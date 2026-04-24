@@ -14,7 +14,7 @@ jobs:
             platform: linux
             build_script: scripts/build-linux-release.sh
             artifact_pattern: zWork-linux-*.AppImage
-          - os: macos-13
+          - os: macos-latest
             platform: macos
             build_script: scripts/build-macos-release.sh
             artifact_pattern: zWork-macos-*.dmg
@@ -100,7 +100,7 @@ jobs:
           | Platform | File |
           |----------|------|
           | **Linux** | \`zWork-linux-x86_64.AppImage\` |
-          | **macOS** | \`zWork-macos-x86_64.dmg\` |
+          | **macOS** | \`zWork-macos-aarch64.dmg\` |
           | **Windows** | \`zWork-windows-x86_64-setup.exe\` |
 
           ### Install
