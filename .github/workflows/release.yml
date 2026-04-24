@@ -170,6 +170,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          pattern: "*-build"
 
       - name: Extract version
         id: version

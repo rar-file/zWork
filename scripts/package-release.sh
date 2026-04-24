@@ -100,6 +100,15 @@ PY
   sig_src="${src}.sig"
   if [[ -f "$sig_src" ]]; then
     cp "$sig_src" "$sig_out"
+  elif [[ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+    (
+      cd "$ROOT_DIR/app"
+      npx tauri signer sign "$out"
+    )
+    if [[ ! -f "$sig_out" ]]; then
+      echo "AppImage signature was not created: $sig_out" >&2
+      exit 1
+    fi
   fi
   echo "$out"
   exit 0
