@@ -2,8 +2,11 @@ import { useMemo, useState } from "react";
 import { Clock3, Download, ExternalLink, RefreshCw } from "lucide-react";
 import { ChatInput } from "./ChatInput";
 import { useApp } from "../lib/store";
+import { useResolvedTheme } from "../lib/theme";
+import { isMacOS } from "../lib/platform";
 import { cn } from "../lib/cn";
 import type { UpdateCardState, UpdateProgress } from "../lib/update";
+import LightRays from "./LightRays";
 
 interface GreetingOption {
   text: string;
@@ -77,9 +80,11 @@ export function Landing({
   const me = useApp((s) => s.me);
   const firstName = (me?.name?.split(/\s+/)[0] || "friend").trim();
   const [sending, setSending] = useState(false);
+  const theme = useResolvedTheme();
 
   const greeting = useMemo(() => pickGreeting(), []);
   const updateBusy = updateProgress.phase !== "idle" && updateProgress.phase !== "error";
+  const macOS = isMacOS();
   const updateLabel =
     updateProgress.phase === "checking"
       ? "Checking…"
@@ -96,29 +101,31 @@ export function Landing({
   return (
     <div className="relative flex h-full min-w-0 flex-1 flex-col bg-paper">
       {/* Drag-only titlebar */}
-      <div className="titlebar-drag absolute inset-x-0 top-0 h-12" />
+      {macOS && <div className="titlebar-drag absolute inset-x-0 top-0 h-12" />}
 
-      {/* Galaxy backdrop behind the welcome block. */}
       <div
         className={cn(
-          "pointer-events-none absolute inset-0 opacity-100",
-          "bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.07)_0%,rgba(255,255,255,0.025)_28%,rgba(255,255,255,0)_58%),linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0))]",
-          "transition-opacity duration-300 ease-out",
+          "pointer-events-none absolute inset-0 transition-opacity duration-300 ease-out",
           particlesExiting && "opacity-0",
         )}
         aria-hidden="true"
       >
+        <LightRays
+          raysOrigin="bottom-center"
+          raysColor={theme === "dark" ? "#ffffff" : "#e9e3d2"}
+          raysSpeed={0.42}
+          lightSpread={0.72}
+          rayLength={1.25}
+          pulsating
+          fadeDistance={1.35}
+          saturation={theme === "dark" ? 1.08 : 0.88}
+          followMouse={false}
+          mouseInfluence={0}
+          noiseAmount={0.18}
+          distortion={0.03}
+          className="opacity-85"
+        />
       </div>
-
-      <div
-        className={cn(
-          "pointer-events-none absolute inset-0",
-          "bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.05)_0%,rgba(255,255,255,0.015)_24%,rgba(255,255,255,0)_56%)]",
-          "transition-opacity duration-300 ease-out",
-          particlesExiting && "opacity-0",
-        )}
-        aria-hidden="true"
-      />
 
       {/* Main content — centered slightly above vertical middle so the chatbox
           lands right below the visual midline. */}

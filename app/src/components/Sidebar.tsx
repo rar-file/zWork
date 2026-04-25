@@ -14,12 +14,14 @@ import {
   FolderOpen,
 } from "lucide-react";
 import { cn } from "../lib/cn";
+import { isMacOS } from "../lib/platform";
 import { Logo } from "./Logo";
 import { IconButton } from "./IconButton";
 import { useApp, bucketFor, type ChatBucket } from "../lib/store";
 
 export function Sidebar() {
   const SHOW_PROJECTS = false;
+  const macOS = isMacOS();
   const open = useApp((s) => s.sidebarOpen);
   const toggle = useApp((s) => s.toggleSidebar);
   const summaries = useApp((s) => s.chatSummaries);
@@ -54,7 +56,7 @@ export function Sidebar() {
       )}
     >
       {/* Titlebar drag area — reserve space for the macOS traffic lights. */}
-      <div className="titlebar-drag relative h-8 shrink-0" />
+      {macOS && <div className="titlebar-drag relative h-8 shrink-0" />}
 
       {/* Top row: logo (top-left, icon only) + optional "zWork" wordmark + collapse toggle */}
       <div
@@ -101,6 +103,7 @@ export function Sidebar() {
             label="Expand sidebar"
             shortcut="⌘\\"
             tooltipSide="right"
+            showTooltip={false}
             onClick={toggle}
             size="sm"
           />

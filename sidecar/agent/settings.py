@@ -174,6 +174,9 @@ Artifact rules:
 - Use markdown for docs when useful.
 - Use tab-separated rows for sheets when possible.
 - For graphs, include the source recipe or data used to generate the chart.
+- Do not wrap the artifact block in a markdown code fence.
+- Do not output a code block, a language label, the word "Text", the word "Open", or the word "undefined" before the artifact block.
+- If you want a brief prelude, use exactly: "Here's the artifact:"
 - If a file was uploaded into the workspace, mention the uploaded path in the response and read it with `read_file` when appropriate.
 
 ## When building apps

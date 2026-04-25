@@ -121,6 +121,7 @@ function extractArtifacts(text: string, sourceMessageId?: string): { cleaned: st
     cleaned = cleaned.replace(match[0], "").trim();
   }
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  cleaned = stripArtifactJunk(cleaned);
   return { cleaned, artifacts };
 }
 
@@ -134,13 +135,27 @@ function inferArtifactKind(text: string): ArtifactKind | null {
 }
 
 function sanitizeArtifactContent(text: string): string {
-  return text
+  return stripArtifactJunk(text)
     .replace(/^Created artifact:.*$/gim, "")
     .replace(/^Created a .* artifact in the sidebar\.$/gim, "")
     .replace(/`?\.sidecar\/[^`\s]+`?/g, "")
     .replace(/Created\s+\w+\s+artifact:?\s*/gim, "")
     .trim()
     .replace(/\n{3,}/g, "\n\n");
+}
+
+function stripArtifactJunk(text: string): string {
+  let out = (text || "").trim();
+  out = out.replace(/^\s*```(?:text|plain|plaintext|markdown)?\s*\n([\s\S]*?)\n```\s*$/i, "$1").trim();
+  out = out.replace(/^```(?:text|plain|plaintext|markdown)?\s*/i, "").replace(/\n```\s*$/i, "").trim();
+  out = out
+    .split("\n")
+    .filter((line) => !/^\s*(text|open|undefined)\s*$/i.test(line))
+    .join("\n")
+    .trim();
+  out = out.replace(/^here(?:'|’)s the artifact:?\s*$/i, "Here's the artifact:");
+  out = out.replace(/\n{3,}/g, "\n\n").trim();
+  return out;
 }
 
 interface AppState {
@@ -803,7 +818,7 @@ export const useApp = create<AppState>((set, get) => ({
             m.id === asstId
               ? {
                   ...m,
-                  content: cleaned || `Created ${artifacts.length} artifact${artifacts.length > 1 ? "s" : ""} in the sidebar.`,
+                  content: cleaned || (artifacts.length === 1 ? "Here's the artifact:" : "Here are the artifacts:"),
                 }
               : m,
           );
@@ -854,7 +869,7 @@ export const useApp = create<AppState>((set, get) => ({
               m.id === asstId
                 ? {
                     ...m,
-                    content: cleaned || `Created a ${artifact.kind} artifact in the sidebar.`,
+                    content: cleaned || "Here's the artifact:",
                   }
                 : m,
             );

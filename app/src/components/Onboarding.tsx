@@ -5,6 +5,7 @@ import { Logo } from "./Logo";
 import { cn } from "../lib/cn";
 import { useApp } from "../lib/store";
 import { useResolvedTheme } from "../lib/theme";
+import { isMacOS } from "../lib/platform";
 import { api, type OnboardingAnswer, type OnboardingCredential } from "../lib/api";
 import LightRays from "./LightRays";
 
@@ -309,6 +310,7 @@ const CUSTOM_MODEL_SENTINEL = "__custom__";
  * ------------------------------------------------------------------ */
 
 export function Onboarding() {
+  const macOS = isMacOS();
   const setOnboardingDone = useApp((s) => s.setOnboardingDone);
   const refreshProviders = useApp((s) => s.refreshProviders);
   const refreshSettings = useApp((s) => s.refreshSettings);
@@ -459,7 +461,7 @@ export function Onboarding() {
       />
 
       {/* titlebar drag */}
-      <div className="titlebar-drag absolute inset-x-0 top-0 z-10 h-10" />
+      {macOS && <div className="titlebar-drag absolute inset-x-0 top-0 z-10 h-10" />}
 
       {/* Content area — card spans full viewport height, pinned right. */}
       <div className="relative z-20 flex h-full flex-1 items-center p-5 md:p-6">

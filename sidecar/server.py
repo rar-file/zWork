@@ -128,14 +128,14 @@ class UploadBody(BaseModel):
 def _artifact_hint(message: str) -> str:
     t = message.lower()
     if any(k in t for k in ["document", "doc", "brief", "report", "note", "summary", "outline", "write a", "draft a", "make a document"]):
-        return "The user's request clearly wants a document artifact. Create a sidebar artifact of kind doc."
+        return "The user's request clearly wants a document artifact. Create a sidebar artifact of kind doc. Do not wrap it in code fences. Do not emit the words Text, Open, or undefined."
     if any(k in t for k in ["table", "sheet", "spreadsheet", "csv", "tsv", "rows", "columns"]):
-        return "The user's request clearly wants a table or spreadsheet artifact. Create a sidebar artifact of kind sheet."
+        return "The user's request clearly wants a table or spreadsheet artifact. Create a sidebar artifact of kind sheet. Do not wrap it in code fences. Do not emit the words Text, Open, or undefined."
     if any(k in t for k in ["chart", "graph", "plot", "visualization", "visualise", "visualize"]):
-        return "The user's request clearly wants a graph artifact. Create a sidebar artifact of kind graph."
+        return "The user's request clearly wants a graph artifact. Create a sidebar artifact of kind graph. Do not wrap it in code fences. Do not emit the words Text, Open, or undefined."
     if any(k in t for k in ["code snippet", "script", "example code", "runnable example"]):
-        return "The user's request clearly wants a code artifact. Create a sidebar artifact of kind code."
-    return "The user's request may or may not want an artifact. If the output is best represented as an editable deliverable, create one."
+        return "The user's request clearly wants a code artifact. Create a sidebar artifact of kind code. Do not wrap it in code fences. Do not emit the words Text, Open, or undefined."
+    return "The user's request may or may not want an artifact. If the output is best represented as an editable deliverable, create one. If you create one, do not wrap it in code fences and do not emit the words Text, Open, or undefined."
 
 
 # ---------------- Health / meta ----------------

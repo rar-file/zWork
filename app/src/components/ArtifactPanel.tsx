@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
+import { cn } from "../lib/cn";
 import { useApp } from "../lib/store";
+import { isMacOS } from "../lib/platform";
 import { IconButton } from "./IconButton";
 import { ArtifactCodeViewer } from "./artifacts/ArtifactCodeViewer";
 import { ArtifactDocViewer } from "./artifacts/ArtifactDocViewer";
@@ -10,6 +12,7 @@ import { ArtifactPreviewViewer } from "./artifacts/ArtifactPreviewViewer";
 import { ArtifactSheetViewer } from "./artifacts/ArtifactSheetViewer";
 
 export function ArtifactPanel() {
+  const macOS = isMacOS();
   const activeChatId = useApp((s) => s.activeChatId);
   const open = useApp((s) => {
     const chatId = s.activeChatId;
@@ -39,7 +42,7 @@ export function ArtifactPanel() {
           className="h-full shrink-0 overflow-hidden border-l border-line bg-paper"
         >
           <div className="flex h-full flex-col">
-            <div className="titlebar-drag flex h-12 shrink-0 items-center justify-between border-b border-line px-3">
+            <div className={cn(macOS && "titlebar-drag", "flex h-12 shrink-0 items-center justify-between border-b border-line px-3")}>
               <div className="min-w-0 flex-1" data-no-drag>
                 <input
                   value={draftTitle}

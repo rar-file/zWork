@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useApp } from "../lib/store";
+import { isMacOS } from "../lib/platform";
 import { ChatInput } from "./ChatInput";
 import { IconButton } from "./IconButton";
 import { api } from "../lib/api";
@@ -258,6 +259,7 @@ function ProjectCard({ project }: { project: { id: string; name: string; descrip
 // ---- Project Detail Page ----
 
 function ProjectDetail() {
+  const macOS = isMacOS();
   const activeId = useApp((s) => s.activeProjectId);
   const projects = useApp((s) => s.projects);
   const chatSummaries = useApp((s) => s.chatSummaries);
@@ -344,7 +346,7 @@ function ProjectDetail() {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-paper">
       {/* Titlebar: back to all projects */}
-      <div className="titlebar-drag flex h-12 shrink-0 items-center border-b border-line px-4">
+      <div className={cn(macOS && "titlebar-drag", "flex h-12 shrink-0 items-center border-b border-line px-4")}>
         <div data-no-drag>
           <button
             type="button"

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Pencil, Check, X, AlertCircle, Settings as SettingsIcon, RefreshCcw } from "lucide-react";
 import { useApp } from "../lib/store";
+import { cn } from "../lib/cn";
+import { isMacOS } from "../lib/platform";
 import { ChatInput } from "./ChatInput";
 import { Message } from "./Message";
 import { IconButton } from "./IconButton";
 
 export function ChatView() {
+  const macOS = isMacOS();
   const chat = useApp((s) =>
     s.activeChatId ? s.chats[s.activeChatId] : undefined,
   );
@@ -53,7 +56,7 @@ export function ChatView() {
       {/* Main chat column */}
       <div className="flex h-full min-w-0 flex-1 flex-col">
         {/* Header */}
-        <div className="titlebar-drag flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
+        <div className={cn(macOS && "titlebar-drag", "flex h-12 shrink-0 items-center justify-between border-b border-line px-4")}>
           <div className="min-w-0 flex items-center gap-2" data-no-drag>
             {editing ? (
               <div className="flex items-center gap-1">

@@ -2,6 +2,13 @@
 
 All notable changes to zWork are documented here.
 
+## v0.3.11
+
+- Restored macOS drag regions while removing the duplicate drag strip from Windows layouts.
+- Replaced the homepage glow with the same ray background direction as onboarding, coming up from the bottom.
+- Cleaned artifact rendering so the model no longer emits the stray `Text` / `Open` / `undefined` code block before artifact cards.
+- Removed the hidden tooltip from the collapsed sidebar expand button.
+
 ## v0.3.10
 
 **Make telemetry default-on and fix update handoff.**
