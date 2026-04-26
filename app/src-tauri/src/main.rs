@@ -79,6 +79,13 @@ fn configure_linux_webview_env() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
+    // Wayland EGL can fail on Intel GPUs (EGL_BAD_PARAMETER).
+    // Use XWayland which works reliably.
+    if std::env::var_os("GDK_BACKEND").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_some()
+    {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
