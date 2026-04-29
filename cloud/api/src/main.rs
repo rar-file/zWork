@@ -1,17 +1,17 @@
 use axum::{
-    extract::{State, Json, Request},
-    routing::{get, post, any},
+    extract::{State, Json, Request, Path},
+    routing::{get, post, put},
     Router,
     response::{IntoResponse, Response},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{info, error};
 use reqwest::Client;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
@@ -28,6 +28,45 @@ struct TelemetryPayload {
     session_id: Option<String>,
     properties: Value,
     ts: i64,
+}
+
+#[derive(Serialize, Deserialize, sqlx::FromRow)]
+struct User {
+    id: Uuid,
+    google_id: String,
+    email: String,
+    name: String,
+    #[serde(rename = "picture_url")]
+    #[sqlx(rename = "picture_url")]
+    picture_url: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    tier: String,
+    #[serde(rename = "subscription_id")]
+    #[sqlx(rename = "subscription_id")]
+    subscription_id: Option<String>,
+    #[serde(rename = "subscription_status")]
+    #[sqlx(rename = "subscription_status")]
+    subscription_status: Option<String>,
+    #[serde(rename = "subscription_end_date")]
+    #[sqlx(rename = "subscription_end_date")]
+    subscription_end_date: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Deserialize)]
+struct CreateUserRequest {
+    google_id: String,
+    email: String,
+    name: String,
+    picture_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateTierRequest {
+    tier: String,
+    subscription_id: Option<String>,
+    subscription_status: Option<String>,
+    subscription_end_date: Option<String>,
 }
 
 async fn health_check() -> &'static str {
@@ -60,7 +99,7 @@ async fn ingest_telemetry(
 
 // AI Proxy Layer (Ollama Cloud)
 async fn ai_proxy(
-    State(state): State<AppState>,
+    _state: State<AppState>,
     req: Request<axum::body::Body>,
 ) -> Result<Response<axum::body::Body>, StatusCode> {
     // Ollama Cloud API Configuration
@@ -98,10 +137,87 @@ async fn ai_proxy(
 }
 
 // Stripe Webhook Endpoint for Paid Plans
-async fn stripe_webhook() -> impl IntoResponse {
+async fn stripe_webhook(_state: State<AppState>) -> impl IntoResponse {
     // In a real implementation, we would use the `stripe` crate to verify the webhook signature
     // and update the user's tier in the Postgres database.
     (StatusCode::OK, "Webhook received").into_response()
+}
+
+// User Endpoints
+
+// Get user by Google ID
+async fn get_user_by_google_id(
+    State(state): State<AppState>,
+    Path(google_id): Path<String>,
+) -> Result<Json<User>, StatusCode> {
+    sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE google_id = $1"
+    )
+    .bind(&google_id)
+    .fetch_optional(&state.db)
+    .await
+    .map(|user| user.map(Json).ok_or(StatusCode::NOT_FOUND))
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+// Create or update user (upsert by Google ID)
+async fn upsert_user(
+    State(state): State<AppState>,
+    Json(req): Json<CreateUserRequest>,
+) -> Result<Json<User>, StatusCode> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        INSERT INTO users (google_id, email, name, picture_url)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (google_id) 
+        DO UPDATE SET 
+            email = EXCLUDED.email,
+            name = EXCLUDED.name,
+            picture_url = EXCLUDED.picture_url,
+            updated_at = NOW()
+        RETURNING *
+        "#
+    )
+    .bind(&req.google_id)
+    .bind(&req.email)
+    .bind(&req.name)
+    .bind(&req.picture_url)
+    .fetch_one(&state.db)
+    .await
+    .map(Json)
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(user)
+}
+
+// Update user tier
+async fn update_user_tier(
+    State(state): State<AppState>,
+    Path(google_id): Path<String>,
+    Json(req): Json<UpdateTierRequest>,
+) -> Result<Json<User>, StatusCode> {
+    let user = sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users 
+        SET 
+            tier = $2,
+            subscription_id = $3,
+            subscription_status = $4,
+            subscription_end_date = $5,
+            updated_at = NOW()
+        WHERE google_id = $1
+        RETURNING *
+        "#
+    )
+    .bind(&google_id)
+    .bind(&req.tier)
+    .bind(&req.subscription_id)
+    .bind(&req.subscription_status)
+    .bind(req.subscription_end_date.as_deref())
+    .fetch_optional(&state.db)
+    .await
+    .map(|user| user.map(Json).ok_or(StatusCode::NOT_FOUND))
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    user
 }
 
 #[tokio::main]
@@ -129,6 +245,10 @@ async fn main() {
         .route("/api/chat/stream", post(ai_proxy))
         .route("/api/v1/chat/completions", post(ai_proxy))
         .route("/api/webhooks/stripe", post(stripe_webhook))
+        // User endpoints
+        .route("/api/users/:google_id", get(get_user_by_google_id))
+        .route("/api/users", post(upsert_user))
+        .route("/api/users/:google_id/tier", put(update_user_tier))
         .with_state(state);
 
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
