@@ -1,91 +1,149 @@
 # zWork Authentication
 
-This document describes the authentication architecture for zWork.
+This document describes the current auth model that is actually wired into the desktop app and cloud services.
 
-## Overview
+## Summary
 
-zWork uses a hybrid authentication model:
-- **Desktop app**: Google OAuth 2.0 (implicit flow via popup window)
-- **Cloud auth service**: Better Auth (v1.6.9) with PostgreSQL backing
-- **Future**: Email + password with verification codes
+zWork uses a **server-backed desktop auth flow**:
 
-## Desktop App Flow (Google OAuth)
+- Google OAuth happens on the server through **Better Auth**
+- the desktop app opens that flow in a browser
+- the cloud API returns a short-lived desktop auth code
+- the desktop app exchanges that code for a bearer token used by cloud endpoints
 
-1. User clicks "Sign in with Google" in `LoginScreen.tsx`
-2. App opens a popup to Google's OAuth consent screen
-3. User authenticates with Google
-4. Popup redirects to `oauth-callback.html` with access token in hash
-5. Callback page posts `OAUTH_SUCCESS` message to parent window
-6. App fetches user info from Google API and stores in Zustand + localStorage
+This is not the old browser-popup implicit-token flow. If you see docs mentioning `oauth-callback.html` or `response_type=token`, those are stale.
 
-### Desktop OAuth Configuration
+## Components
 
-- Client ID: `YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com`
-- Redirect URI: `http://localhost:1420/oauth-callback.html` (desktop) / `https://tryzwork.app/oauth-callback.html` (web)
-- Scope: `openid email profile`
+| Component | Path | Role |
+|-----------|------|------|
+| Desktop auth UI | `app/src/components/CloudGate.tsx` | blocks app entry until account auth is complete |
+| Desktop auth client | `app/src/lib/cloud.ts` | starts auth, exchanges code, stores bearer token |
+| Native auth helper | `app/src-tauri/src/main.rs` | opens browser and listens on localhost callback |
+| Cloud API | `cloud-src/api/src/main.rs` | desktop auth start/complete/exchange/logout endpoints |
+| Better Auth service | `cloud-src/auth/index.ts` | Google OAuth provider and session management |
 
-### Known Issues
+## Current desktop flow
 
-- **Desktop client type** in Google Cloud Console does not support `response_type=token` (implicit flow). For local testing, create a **Web application** OAuth client with redirect URIs registered.
-- Production deployment uses the Web application client type.
-
-## Cloud Auth Service (Better Auth)
-
-The `better_auth` service runs at `api.tryzwork.app/api/auth/*` behind Caddy.
-
-### Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/auth/sign-in/email` | POST | Email + password login |
-| `/api/auth/sign-up/email` | POST | Email + password registration |
-| `/api/auth/sign-in/social` | POST | Social login (Google) |
-| `/api/auth/sign-out` | POST | Sign out |
-| `/api/auth/session` | GET | Get current session |
-
-### Database Schema
-
-Better Auth manages its own tables (`user`, `session`, `account`, `verification`).
-
-Our custom `users` table (for tier/subscription tracking):
-
-```sql
-CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    google_id VARCHAR(255) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    picture_url TEXT,
-    tier VARCHAR(50) DEFAULT 'free' CHECK (tier IN ('free', 'pro')),
-    subscription_id VARCHAR(255),
-    subscription_status VARCHAR(50),
-    subscription_end_date TIMESTAMP WITH TIME ZONE
-);
+```text
+desktop app
+  -> /api/desktop/auth/start?port=<localhost-port>
+  -> server returns HTML that posts into Better Auth social sign-in
+  -> user completes Google OAuth in browser
+  -> Better Auth session is created on the server
+  -> cloud API redirects to http://127.0.0.1:<port>/callback?code=<one-time-code>
+  -> desktop app exchanges code at /api/desktop/auth/exchange
+  -> desktop stores bearer token in localStorage
 ```
 
-## User Tier System
+## Required Google setup
 
-| Tier | Models | Features |
-|------|--------|----------|
-| `free` | minimax-m2.7:cloud | Basic chat, file ops |
-| `pro` | All models | Cloud sync, priority, advanced features |
+Use a **Web application** OAuth client in Google Cloud Console, not a Desktop client, because the callback is server-hosted.
 
-Tier enforcement happens in the Axum API proxy (`cloud/api/src/main.rs`).
+Required redirect URI:
 
-## Environment Variables
+```text
+https://api.tryzwork.app/api/auth/callback/google
+```
+
+Recommended authorized origins:
+
+```text
+https://tryzwork.app
+https://www.tryzwork.app
+https://api.tryzwork.app
+```
+
+If the app is still in Google testing mode, every test account must be added under OAuth consent screen test users.
+
+## Better Auth routes
+
+Better Auth is reverse-proxied under:
+
+```text
+https://api.tryzwork.app/api/auth/*
+```
+
+Examples:
+
+- `/api/auth/sign-in/social`
+- `/api/auth/sign-out`
+- `/api/auth/get-session`
+- `/api/auth/callback/google`
+
+## Desktop token model
+
+The desktop app does not reuse browser cookies directly after sign-in. Instead:
+
+1. Better Auth creates the server session.
+2. zWork creates a one-time desktop auth code.
+3. The desktop exchanges it for a bearer token.
+4. That bearer token is used against:
+   - `/api/session`
+   - `/api/analytics/summary`
+   - `/api/dev/redeem-coupon`
+   - managed hosted model routes
+
+The bearer token is intended for the desktop app, not for general public API access.
+
+## Session storage
+
+## Server-side
+
+Better Auth maintains its own auth/session tables. zWork also maintains:
+
+- `app_users`
+- `desktop_auth_codes`
+- `desktop_access_tokens`
+- `gateway_requests`
+
+## Desktop-side
+
+The desktop token is currently stored in:
+
+```text
+localStorage["zwork:cloud-token"]
+```
+
+The desktop app clears it on logout or when session fetch fails.
+
+## Verification checklist
+
+From a signed-out state:
+
+1. Launch the desktop app.
+2. Confirm the auth gate appears.
+3. Click Google sign-in.
+4. Complete OAuth in the browser.
+5. Confirm the desktop app returns with a signed-in session.
+6. Open Analytics and confirm `/api/analytics/summary` succeeds.
+
+Server-side spot checks:
 
 ```bash
-# Auth service
-DATABASE_URL=postgres://zwork:zwork_password@postgres:5432/zwork_db
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-BETTER_AUTH_SECRET=...
-BETTER_AUTH_URL=https://api.tryzwork.app
+curl -i https://api.tryzwork.app/api/session
+curl -i "https://api.tryzwork.app/api/desktop/auth/start?port=43123"
 ```
 
-## Future Work
+Expected:
 
-- [ ] Email verification codes
-- [ ] Password reset flow
-- [ ] Session refresh tokens
-- [ ] Cross-device sync via Better Auth sessions
+- unauthenticated `/api/session` returns `401`
+- `/api/desktop/auth/start` returns `200`
+
+## Common failure modes
+
+## `redirect_uri_mismatch`
+
+Usually means the Google Web OAuth client is missing the exact redirect URI:
+
+```text
+https://api.tryzwork.app/api/auth/callback/google
+```
+
+## “New user can’t sign in”
+
+If Google OAuth is still in testing mode, that user is probably not listed as a test user.
+
+## Desktop auth appears signed out after logout
+
+The desktop app must clear both the stored bearer token and the in-memory store user. This has been fixed in the current app state sync.
