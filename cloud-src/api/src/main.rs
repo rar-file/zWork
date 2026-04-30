@@ -1,6 +1,6 @@
 use axum::{
     extract::{Json, Path, Query, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post, put},
     Router,
@@ -27,18 +27,71 @@ struct AppState {
     auth_public_base: String,
     google_client_id: String,
     google_client_secret: String,
+    owner_emails: Vec<String>,
     gateway: GatewayConfig,
 }
 
 #[derive(Clone)]
 struct GatewayConfig {
-    base_url: String,
-    api_key: String,
-    model: String,
+    router_label: String,
+    providers: Vec<GatewayProvider>,
     bearer_token: String,
-    root_requests_per_day: i64,
+    root_requests_per_5h: i64,
+    weekly_limit_multiplier: i64,
     max_concurrent_roots: i64,
     dev_coupon_codes: Vec<String>,
+}
+
+#[derive(Clone)]
+struct GatewayProvider {
+    name: String,
+    base_url: String,
+    api_key: String,
+    primary_model: String,
+    fallback_model: String,
+}
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn load_gateway_providers() -> Vec<GatewayProvider> {
+    let order = std::env::var("ROUTER_PROVIDER_ORDER")
+        .unwrap_or_else(|_| "groq,cerebras,mistral".to_string());
+    let mut providers = Vec::new();
+
+    for name in order.split(',').map(|item| item.trim().to_ascii_lowercase()) {
+        let provider = match name.as_str() {
+            "groq" => GatewayProvider {
+                name: "Groq".to_string(),
+                base_url: env_or("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+                api_key: std::env::var("GROQ_API_KEY").unwrap_or_default(),
+                primary_model: env_or("GROQ_MODEL_PRIMARY", "openai/gpt-oss-120b"),
+                fallback_model: env_or("GROQ_MODEL_FALLBACK", "openai/gpt-oss-20b"),
+            },
+            "cerebras" => GatewayProvider {
+                name: "Cerebras".to_string(),
+                base_url: env_or("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1"),
+                api_key: std::env::var("CEREBRAS_API_KEY").unwrap_or_default(),
+                primary_model: env_or("CEREBRAS_MODEL_PRIMARY", "gpt-oss-120b"),
+                fallback_model: env_or("CEREBRAS_MODEL_FALLBACK", "llama3.1-8b"),
+            },
+            "mistral" => GatewayProvider {
+                name: "Mistral".to_string(),
+                base_url: env_or("MISTRAL_BASE_URL", "https://api.mistral.ai/v1"),
+                api_key: std::env::var("MISTRAL_API_KEY").unwrap_or_default(),
+                primary_model: env_or("MISTRAL_MODEL_PRIMARY", "mistral-medium-3.5"),
+                fallback_model: env_or("MISTRAL_MODEL_FALLBACK", "devstral-2512"),
+            },
+            _ => continue,
+        };
+
+        if !provider.api_key.trim().is_empty() {
+            providers.push(provider);
+        }
+    }
+
+    providers
 }
 
 #[derive(Deserialize)]
@@ -168,6 +221,31 @@ struct AnalyticsDayRow {
     continuations: i64,
 }
 
+#[derive(sqlx::FromRow)]
+struct ProviderAggregateRow {
+    provider_name: String,
+    requests_7d: i64,
+    roots_7d: i64,
+    continuations_7d: i64,
+    total_tokens_7d: i64,
+    prompt_tokens_7d: i64,
+    completion_tokens_7d: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct ProviderSnapshotRow {
+    provider_name: String,
+    last_model_id: Option<String>,
+    last_status: Option<i32>,
+    requests_limit_day: Option<i64>,
+    requests_remaining_day: Option<i64>,
+    requests_reset_day_seconds: Option<i64>,
+    tokens_limit_minute: Option<i64>,
+    tokens_remaining_minute: Option<i64>,
+    tokens_reset_minute_seconds: Option<i64>,
+    observed_at: DateTime<Utc>,
+}
+
 #[derive(Serialize)]
 struct AnalyticsDay {
     day: String,
@@ -178,17 +256,44 @@ struct AnalyticsDay {
 #[derive(Serialize)]
 struct AnalyticsSummary {
     user: AppUser,
+    router_label: String,
     root_requests_today: i64,
     continuation_requests_today: i64,
     active_runs: i64,
     root_requests_total: i64,
     continuation_requests_total: i64,
+    five_hour_limit: i64,
+    five_hour_used: i64,
+    weekly_limit: i64,
+    weekly_used: i64,
     past_week: Vec<AnalyticsDay>,
+    past_month: Vec<AnalyticsDay>,
     managed_gateway_ready: bool,
     managed_gateway_status: String,
+    owner_provider_overview: Vec<ProviderOverview>,
     api_url: String,
     analytics_url: String,
     db_url: String,
+}
+
+#[derive(Serialize)]
+struct ProviderOverview {
+    provider_name: String,
+    requests_7d: i64,
+    roots_7d: i64,
+    continuations_7d: i64,
+    total_tokens_7d: i64,
+    prompt_tokens_7d: i64,
+    completion_tokens_7d: i64,
+    last_model_id: Option<String>,
+    last_status: Option<i32>,
+    last_observed_at: Option<String>,
+    requests_limit_day: Option<i64>,
+    requests_remaining_day: Option<i64>,
+    requests_reset_day_seconds: Option<i64>,
+    tokens_limit_minute: Option<i64>,
+    tokens_remaining_minute: Option<i64>,
+    tokens_reset_minute_seconds: Option<i64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -231,9 +336,78 @@ async fn bootstrap_schema(db: &PgPool) -> Result<(), sqlx::Error> {
             user_id TEXT NOT NULL,
             run_id TEXT NOT NULL,
             request_kind TEXT NOT NULL CHECK (request_kind IN ('root', 'continuation')),
+            provider_name TEXT,
+            model_id TEXT,
+            prompt_tokens BIGINT,
+            completion_tokens BIGINT,
+            total_tokens BIGINT,
             upstream_status INT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             finished_at TIMESTAMPTZ
+        );
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE gateway_requests
+        ADD COLUMN IF NOT EXISTS provider_name TEXT;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE gateway_requests
+        ADD COLUMN IF NOT EXISTS model_id TEXT;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE gateway_requests
+        ADD COLUMN IF NOT EXISTS prompt_tokens BIGINT;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE gateway_requests
+        ADD COLUMN IF NOT EXISTS completion_tokens BIGINT;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE gateway_requests
+        ADD COLUMN IF NOT EXISTS total_tokens BIGINT;
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS provider_snapshots (
+            provider_name TEXT PRIMARY KEY,
+            last_model_id TEXT,
+            last_status INT,
+            requests_limit_day BIGINT,
+            requests_remaining_day BIGINT,
+            requests_reset_day_seconds BIGINT,
+            tokens_limit_minute BIGINT,
+            tokens_remaining_minute BIGINT,
+            tokens_reset_minute_seconds BIGINT,
+            observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         "#,
     )
@@ -458,6 +632,11 @@ async fn upsert_app_user(state: &AppState, auth_user: &BetterAuthUser) -> Result
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+fn is_owner_email(state: &AppState, email: &str) -> bool {
+    let email = email.trim().to_ascii_lowercase();
+    !email.is_empty() && state.owner_emails.iter().any(|item| item == &email)
+}
+
 async fn resolve_app_user(state: &AppState, access: GatewayAccess) -> Result<Option<AppUser>, StatusCode> {
     match access {
         GatewayAccess::ServiceToken => Ok(None),
@@ -467,13 +646,13 @@ async fn resolve_app_user(state: &AppState, access: GatewayAccess) -> Result<Opt
 }
 
 async fn enforce_root_rate_limit(state: &AppState, user_id: &str) -> Result<(), StatusCode> {
-    let used_today: i64 = sqlx::query_scalar(
+    let used_last_5h: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
         FROM gateway_requests
         WHERE user_id = $1
           AND request_kind = 'root'
-          AND created_at >= date_trunc('day', NOW())
+          AND created_at >= NOW() - INTERVAL '5 hours'
         "#,
     )
     .bind(user_id)
@@ -481,7 +660,26 @@ async fn enforce_root_rate_limit(state: &AppState, user_id: &str) -> Result<(), 
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if used_today >= state.gateway.root_requests_per_day {
+    if used_last_5h >= state.gateway.root_requests_per_5h {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    let weekly_limit = state.gateway.root_requests_per_5h * state.gateway.weekly_limit_multiplier.max(1);
+    let used_last_7d: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM gateway_requests
+        WHERE user_id = $1
+          AND request_kind = 'root'
+          AND created_at >= NOW() - INTERVAL '7 days'
+        "#,
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if used_last_7d >= weekly_limit {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
@@ -504,6 +702,139 @@ async fn enforce_root_rate_limit(state: &AppState, user_id: &str) -> Result<(), 
     }
 
     Ok(())
+}
+
+async fn mark_gateway_request_upstream(
+    state: &AppState,
+    request_id: Uuid,
+    provider_name: &str,
+    model_id: &str,
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+) {
+    let _ = sqlx::query(
+        r#"
+        UPDATE gateway_requests
+        SET provider_name = $2,
+            model_id = $3,
+            prompt_tokens = $4,
+            completion_tokens = $5,
+            total_tokens = $6
+        WHERE id = $1
+        "#,
+    )
+    .bind(request_id)
+    .bind(provider_name)
+    .bind(model_id)
+    .bind(prompt_tokens)
+    .bind(completion_tokens)
+    .bind(total_tokens)
+    .execute(&state.db)
+    .await;
+}
+
+fn parse_i64_header(headers: &HeaderMap, name: &str) -> Option<i64> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<i64>().ok())
+}
+
+fn parse_usage_counts(body_json: &Value) -> (Option<i64>, Option<i64>, Option<i64>) {
+    let usage = body_json.get("usage").and_then(|value| value.as_object());
+    let prompt = usage
+        .and_then(|usage| usage.get("prompt_tokens"))
+        .and_then(|value| value.as_i64());
+    let completion = usage
+        .and_then(|usage| usage.get("completion_tokens"))
+        .and_then(|value| value.as_i64());
+    let total = usage
+        .and_then(|usage| usage.get("total_tokens"))
+        .and_then(|value| value.as_i64());
+    (prompt, completion, total)
+}
+
+fn wrap_json_completion_as_sse(body_json: &Value) -> Option<Vec<u8>> {
+    let choices = body_json.get("choices")?.as_array()?;
+    let first = choices.first()?;
+    let finish_reason = first
+        .get("finish_reason")
+        .cloned()
+        .unwrap_or(Value::String("stop".to_string()));
+    let message = first.get("message")?.as_object()?;
+    let mut delta = serde_json::Map::new();
+
+    if let Some(content) = message.get("content").cloned() {
+        delta.insert("content".to_string(), content);
+    }
+
+    if let Some(tool_calls) = message.get("tool_calls").cloned() {
+        delta.insert("tool_calls".to_string(), tool_calls);
+    }
+
+    let event = serde_json::json!({
+        "id": body_json.get("id").cloned().unwrap_or(Value::Null),
+        "object": "chat.completion.chunk",
+        "created": body_json.get("created").cloned().unwrap_or(Value::Null),
+        "model": body_json.get("model").cloned().unwrap_or(Value::Null),
+        "choices": [{
+            "index": 0,
+            "delta": Value::Object(delta),
+            "finish_reason": finish_reason,
+        }]
+    });
+
+    let payload = format!("data: {}\n\ndata: [DONE]\n\n", event);
+    Some(payload.into_bytes())
+}
+
+async fn upsert_provider_snapshot(
+    state: &AppState,
+    provider_name: &str,
+    model_id: &str,
+    status: i32,
+    headers: &HeaderMap,
+) {
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO provider_snapshots (
+            provider_name,
+            last_model_id,
+            last_status,
+            requests_limit_day,
+            requests_remaining_day,
+            requests_reset_day_seconds,
+            tokens_limit_minute,
+            tokens_remaining_minute,
+            tokens_reset_minute_seconds,
+            observed_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        ON CONFLICT (provider_name)
+        DO UPDATE SET
+            last_model_id = EXCLUDED.last_model_id,
+            last_status = EXCLUDED.last_status,
+            requests_limit_day = EXCLUDED.requests_limit_day,
+            requests_remaining_day = EXCLUDED.requests_remaining_day,
+            requests_reset_day_seconds = EXCLUDED.requests_reset_day_seconds,
+            tokens_limit_minute = EXCLUDED.tokens_limit_minute,
+            tokens_remaining_minute = EXCLUDED.tokens_remaining_minute,
+            tokens_reset_minute_seconds = EXCLUDED.tokens_reset_minute_seconds,
+            observed_at = NOW()
+        "#,
+    )
+    .bind(provider_name)
+    .bind(model_id)
+    .bind(status)
+    .bind(parse_i64_header(headers, "x-ratelimit-limit-requests-day"))
+    .bind(parse_i64_header(headers, "x-ratelimit-remaining-requests-day"))
+    .bind(parse_i64_header(headers, "x-ratelimit-reset-requests-day"))
+    .bind(parse_i64_header(headers, "x-ratelimit-limit-tokens-minute"))
+    .bind(parse_i64_header(headers, "x-ratelimit-remaining-tokens-minute"))
+    .bind(parse_i64_header(headers, "x-ratelimit-reset-tokens-minute"))
+    .execute(&state.db)
+    .await;
 }
 
 async fn insert_gateway_request(
@@ -582,70 +913,168 @@ async fn ingest_telemetry(
 async fn ai_proxy(
     State(state): State<AppState>,
     req: Request<axum::body::Body>,
-) -> Result<Response<axum::body::Body>, StatusCode> {
+) -> Result<Response<axum::body::Body>, (StatusCode, String)> {
     let headers = req.headers().clone();
-    let access = ensure_gateway_access(&state, &headers).await?;
+    let access = ensure_gateway_access(&state, &headers)
+        .await
+        .map_err(|status| (status, "gateway_access_denied".to_string()))?;
     let run_id = run_id_from_headers(&headers);
     let request_kind = request_kind_from_headers(&headers);
-    let app_user = resolve_app_user(&state, access).await?;
+    let app_user = resolve_app_user(&state, access)
+        .await
+        .map_err(|status| (status, "gateway_user_resolution_failed".to_string()))?;
 
     if let (Some(user), RequestKind::Root) = (&app_user, request_kind) {
-        enforce_root_rate_limit(&state, &user.user_id).await?;
+        enforce_root_rate_limit(&state, &user.user_id)
+            .await
+            .map_err(|status| {
+                let message = match status {
+                    StatusCode::TOO_MANY_REQUESTS => "root_request_quota_exceeded".to_string(),
+                    StatusCode::CONFLICT => "too_many_active_runs".to_string(),
+                    _ => "gateway_rate_limit_failed".to_string(),
+                };
+                (status, message)
+            })?;
     }
 
     let request_id = if let Some(user) = &app_user {
-        Some(insert_gateway_request(&state, &user.user_id, &run_id, request_kind).await?)
+        Some(
+            insert_gateway_request(&state, &user.user_id, &run_id, request_kind)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "gateway_request_log_failed".to_string()))?,
+        )
     } else {
         None
     };
 
-    let gateway_base = state.gateway.base_url.trim_end_matches('/');
-    let gateway_model = state.gateway.model.clone();
-    let gateway_endpoint = format!("{gateway_base}/chat/completions");
-    if state.gateway.api_key.trim().is_empty() {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    if state.gateway.providers.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "hosted_gateway_not_configured".to_string(),
+        ));
     }
     let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024 * 10)
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "request_body_too_large".to_string()))?;
     let mut body_json: Value =
-        serde_json::from_slice(&body_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+        serde_json::from_slice(&body_bytes).map_err(|_| (StatusCode::BAD_REQUEST, "invalid_chat_payload".to_string()))?;
 
-    if let Some(obj) = body_json.as_object_mut() {
-        obj.insert("model".to_string(), Value::String(gateway_model));
-    }
+    let mut failures: Vec<String> = Vec::new();
 
-    let mut builder = state
-        .http_client
-        .post(gateway_endpoint)
-        .header("Content-Type", "application/json")
-        .json(&body_json);
+    for provider in &state.gateway.providers {
+        let models = if provider.fallback_model.trim().is_empty()
+            || provider.fallback_model.trim() == provider.primary_model.trim()
+        {
+            vec![provider.primary_model.clone()]
+        } else {
+            vec![provider.primary_model.clone(), provider.fallback_model.clone()]
+        };
 
-    if !state.gateway.api_key.trim().is_empty() {
-        builder = builder.header("Authorization", format!("Bearer {}", state.gateway.api_key));
-    }
-
-    let resp = match builder.send().await {
-        Ok(resp) => resp,
-        Err(_) => {
-            if let Some(request_id) = request_id {
-                finish_gateway_request(&state, request_id, None).await;
+        for model_name in models {
+            let mut attempt_body = body_json.clone();
+            if let Some(obj) = attempt_body.as_object_mut() {
+                obj.insert("model".to_string(), Value::String(model_name.clone()));
             }
-            return Err(StatusCode::BAD_GATEWAY);
-        }
-    };
 
-    let status = resp.status();
-    let stream = resp.bytes_stream();
-    let body = axum::body::Body::from_stream(stream);
-    let mut response = Response::new(body);
-    *response.status_mut() = status;
+            let endpoint = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+            let mut builder = state
+                .http_client
+                .post(endpoint)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", provider.api_key))
+                .json(&attempt_body);
+
+            let resp = match builder.send().await {
+                Ok(resp) => resp,
+                Err(_) => {
+                    failures.push(format!("{}:{} unreachable", provider.name, model_name));
+                    continue;
+                }
+            };
+
+            let status = resp.status();
+            let upstream_headers = resp.headers().clone();
+            if !status.is_success() {
+                let detail = resp
+                    .text()
+                    .await
+                    .unwrap_or_default()
+                    .chars()
+                    .take(180)
+                    .collect::<String>();
+                failures.push(format!("{}:{} {} {}", provider.name, model_name, status.as_u16(), detail));
+                continue;
+            }
+
+            let body_bytes = match resp.bytes().await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    failures.push(format!("{}:{} response_read_failed", provider.name, model_name));
+                    continue;
+                }
+            };
+            let body_json: Option<Value> = serde_json::from_slice(&body_bytes).ok();
+            let (prompt_tokens, completion_tokens, total_tokens) = body_json
+                .as_ref()
+                .map(parse_usage_counts)
+                .unwrap_or((None, None, None));
+            if let Some(request_id) = request_id {
+                mark_gateway_request_upstream(
+                    &state,
+                    request_id,
+                    &provider.name,
+                    &model_name,
+                    prompt_tokens,
+                    completion_tokens,
+                    total_tokens,
+                )
+                .await;
+                finish_gateway_request(&state, request_id, Some(status.as_u16() as i32)).await;
+            }
+            upsert_provider_snapshot(
+                &state,
+                &provider.name,
+                &model_name,
+                status.as_u16() as i32,
+                &upstream_headers,
+            )
+            .await;
+
+            let response_bytes = body_json
+                .as_ref()
+                .and_then(wrap_json_completion_as_sse)
+                .unwrap_or_else(|| body_bytes.to_vec());
+            let body = axum::body::Body::from(response_bytes);
+            let mut response = Response::new(body);
+            *response.status_mut() = status;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/event-stream; charset=utf-8"),
+            );
+            response.headers_mut().insert(
+                HeaderName::from_static("x-zwork-router-provider"),
+                HeaderValue::from_str(&provider.name).unwrap_or_else(|_| HeaderValue::from_static("zwork-router")),
+            );
+            response.headers_mut().insert(
+                HeaderName::from_static("x-zwork-router-model"),
+                HeaderValue::from_str(&model_name).unwrap_or_else(|_| HeaderValue::from_static("unknown")),
+            );
+            response.headers_mut().insert(
+                HeaderName::from_static("x-zwork-router-label"),
+                HeaderValue::from_str(&state.gateway.router_label).unwrap_or_else(|_| HeaderValue::from_static("zWork Router")),
+            );
+            return Ok(response);
+        }
+    }
 
     if let Some(request_id) = request_id {
-        finish_gateway_request(&state, request_id, Some(status.as_u16() as i32)).await;
+        finish_gateway_request(&state, request_id, Some(StatusCode::BAD_GATEWAY.as_u16() as i32)).await;
     }
 
-    Ok(response)
+    Err((
+        StatusCode::BAD_GATEWAY,
+        format!("router_upstreams_failed: {}", failures.join(" | ")),
+    ))
 }
 
 fn cors_allowed_origins() -> Vec<HeaderValue> {
@@ -1128,6 +1557,34 @@ async fn analytics_summary(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let five_hour_used: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM gateway_requests
+        WHERE user_id = $1
+          AND request_kind = 'root'
+          AND created_at >= NOW() - INTERVAL '5 hours'
+        "#,
+    )
+    .bind(&user.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let weekly_used: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM gateway_requests
+        WHERE user_id = $1
+          AND request_kind = 'root'
+          AND created_at >= NOW() - INTERVAL '7 days'
+        "#,
+    )
+    .bind(&user.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     let rows = sqlx::query_as::<_, AnalyticsDayRow>(
         r#"
         SELECT
@@ -1155,29 +1612,137 @@ async fn analytics_summary(
         })
         .collect();
 
-    let managed_gateway_ready = !state.gateway.api_key.trim().is_empty()
-        && !state.gateway.base_url.trim().is_empty()
-        && !state.gateway.model.trim().is_empty();
+    let month_rows = sqlx::query_as::<_, AnalyticsDayRow>(
+        r#"
+        SELECT
+            DATE(created_at) AS day,
+            COUNT(*) FILTER (WHERE request_kind = 'root')::BIGINT AS roots,
+            COUNT(*) FILTER (WHERE request_kind = 'continuation')::BIGINT AS continuations
+        FROM gateway_requests
+        WHERE user_id = $1
+          AND created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY DATE(created_at)
+        ORDER BY day ASC
+        "#,
+    )
+    .bind(&user.user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let past_month = month_rows
+        .into_iter()
+        .map(|row| AnalyticsDay {
+            day: row.day.to_string(),
+            roots: row.roots,
+            continuations: row.continuations,
+        })
+        .collect();
+
+    let managed_gateway_ready = !state.gateway.providers.is_empty();
     let managed_gateway_status = if managed_gateway_ready {
-        "Hosted gateway is ready.".to_string()
-    } else if state.gateway.api_key.trim().is_empty() {
-        "Hosted gateway is not configured yet. Add OLLAMA_API_KEY on the server.".to_string()
-    } else if state.gateway.base_url.trim().is_empty() {
-        "Hosted gateway is missing an upstream base URL.".to_string()
+        let provider_list = state
+            .gateway
+            .providers
+            .iter()
+            .map(|provider| format!("{} ({}, fallback {})", provider.name, provider.primary_model, provider.fallback_model))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        format!("{} is ready via {}", state.gateway.router_label, provider_list)
     } else {
-        "Hosted gateway is missing an upstream model identifier.".to_string()
+        "Hosted gateway is not configured yet. Add at least one provider API key on the server.".to_string()
     };
+
+    let five_hour_limit = state.gateway.root_requests_per_5h;
+    let weekly_limit = state.gateway.root_requests_per_5h * state.gateway.weekly_limit_multiplier.max(1);
+    let mut owner_provider_overview = Vec::new();
+
+    if is_owner_email(&state, &user.email) {
+        let aggregate_rows = sqlx::query_as::<_, ProviderAggregateRow>(
+            r#"
+            SELECT
+                COALESCE(provider_name, 'Unknown') AS provider_name,
+                COUNT(*)::BIGINT AS requests_7d,
+                COUNT(*) FILTER (WHERE request_kind = 'root')::BIGINT AS roots_7d,
+                COUNT(*) FILTER (WHERE request_kind = 'continuation')::BIGINT AS continuations_7d,
+                COALESCE(SUM(total_tokens), 0)::BIGINT AS total_tokens_7d,
+                COALESCE(SUM(prompt_tokens), 0)::BIGINT AS prompt_tokens_7d,
+                COALESCE(SUM(completion_tokens), 0)::BIGINT AS completion_tokens_7d
+            FROM gateway_requests
+            WHERE created_at >= NOW() - INTERVAL '7 days'
+            GROUP BY COALESCE(provider_name, 'Unknown')
+            ORDER BY requests_7d DESC, provider_name ASC
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let snapshot_rows = sqlx::query_as::<_, ProviderSnapshotRow>(
+            r#"
+            SELECT
+                provider_name,
+                last_model_id,
+                last_status,
+                requests_limit_day,
+                requests_remaining_day,
+                requests_reset_day_seconds,
+                tokens_limit_minute,
+                tokens_remaining_minute,
+                tokens_reset_minute_seconds,
+                observed_at
+            FROM provider_snapshots
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        for aggregate in aggregate_rows {
+            if aggregate.provider_name == "Unknown" {
+                continue;
+            }
+            let snapshot = snapshot_rows
+                .iter()
+                .find(|row| row.provider_name == aggregate.provider_name);
+            owner_provider_overview.push(ProviderOverview {
+                provider_name: aggregate.provider_name,
+                requests_7d: aggregate.requests_7d,
+                roots_7d: aggregate.roots_7d,
+                continuations_7d: aggregate.continuations_7d,
+                total_tokens_7d: aggregate.total_tokens_7d,
+                prompt_tokens_7d: aggregate.prompt_tokens_7d,
+                completion_tokens_7d: aggregate.completion_tokens_7d,
+                last_model_id: snapshot.and_then(|row| row.last_model_id.clone()),
+                last_status: snapshot.and_then(|row| row.last_status),
+                last_observed_at: snapshot.map(|row| row.observed_at.to_rfc3339()),
+                requests_limit_day: snapshot.and_then(|row| row.requests_limit_day),
+                requests_remaining_day: snapshot.and_then(|row| row.requests_remaining_day),
+                requests_reset_day_seconds: snapshot.and_then(|row| row.requests_reset_day_seconds),
+                tokens_limit_minute: snapshot.and_then(|row| row.tokens_limit_minute),
+                tokens_remaining_minute: snapshot.and_then(|row| row.tokens_remaining_minute),
+                tokens_reset_minute_seconds: snapshot.and_then(|row| row.tokens_reset_minute_seconds),
+            });
+        }
+    }
 
     Ok(Json(AnalyticsSummary {
         user,
+        router_label: state.gateway.router_label.clone(),
         root_requests_today,
         continuation_requests_today,
         active_runs,
         root_requests_total,
         continuation_requests_total,
+        five_hour_limit,
+        five_hour_used,
+        weekly_limit,
+        weekly_used,
         past_week,
+        past_month,
         managed_gateway_ready,
         managed_gateway_status,
+        owner_provider_overview,
         api_url: "https://api.tryzwork.app/health".to_string(),
         analytics_url: "https://us.posthog.com/project/397748".to_string(),
         db_url: "https://db.tryzwork.app/".to_string(),
@@ -1213,19 +1778,25 @@ async fn main() {
             .unwrap_or_else(|_| "https://api.tryzwork.app/api/auth".to_string()),
         google_client_id: std::env::var("GOOGLE_CLIENT_ID").unwrap_or_default(),
         google_client_secret: std::env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+        owner_emails: std::env::var("OWNER_EMAILS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|item| item.trim().to_ascii_lowercase())
+            .filter(|item| !item.is_empty())
+            .collect(),
         gateway: GatewayConfig {
-            base_url: std::env::var("OLLAMA_BASE_URL")
-                .unwrap_or_else(|_| "https://api.ollama.com/v1".to_string()),
-            api_key: std::env::var("OLLAMA_API_KEY")
-                .or_else(|_| std::env::var("ZWORK_TEST_OLLAMA_API_KEY"))
-                .unwrap_or_default(),
-            model: std::env::var("OLLAMA_MODEL")
-                .unwrap_or_else(|_| "minimax-m2.7:cloud".to_string()),
+            router_label: env_or("ROUTER_LABEL", "zWork Router"),
+            providers: load_gateway_providers(),
             bearer_token: std::env::var("ZWORK_GATEWAY_TOKEN").unwrap_or_default(),
-            root_requests_per_day: std::env::var("ROOT_REQUESTS_PER_DAY")
+            root_requests_per_5h: std::env::var("ROOT_REQUESTS_PER_5H")
+                .or_else(|_| std::env::var("ROOT_REQUESTS_PER_DAY"))
                 .ok()
                 .and_then(|v| v.parse::<i64>().ok())
-                .unwrap_or(200),
+                .unwrap_or(20),
+            weekly_limit_multiplier: std::env::var("WEEKLY_LIMIT_MULTIPLIER")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(5),
             max_concurrent_roots: std::env::var("MAX_CONCURRENT_ROOT_RUNS")
                 .ok()
                 .and_then(|v| v.parse::<i64>().ok())

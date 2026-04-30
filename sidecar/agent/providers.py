@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
@@ -30,10 +31,10 @@ from .tools import TOOL_SCHEMAS, execute_tool, parse_tool_calls
 
 
 MAX_TURNS = 24
-PREV1_OLLAMA_MODEL_ID = "minimax-m2.7:cloud"
-PREV1_OLLAMA_ZWORK_ID = "ollama-minimax-m2-7-cloud"
-PREV1_OLLAMA_MODEL_NAME = "MiniMax M2.7 Cloud"
-PREV1_OLLAMA_BASE_URL = "https://ollama.com/v1"
+ZWORK_ROUTER_MODEL_ID = "zwork-router"
+ZWORK_ROUTER_ZWORK_ID = "zwork-router"
+ZWORK_ROUTER_MODEL_NAME = "zWork Router"
+ZWORK_ROUTER_BASE_URL = "https://api.tryzwork.app/api/v1"
 
 
 def _max_tokens_for(model_id: str) -> int:
@@ -73,46 +74,6 @@ def _is_local_ollama_base(url: str) -> bool:
     )
 
 
-def is_ollama_cloud_base(url: str) -> bool:
-    base = (url or "").strip().rstrip("/").lower()
-    return base in ("https://ollama.com/v1", "https://api.ollama.com/v1") or "ollama.com" in base
-
-
-def _has_ollama_cloud_setup(s: settings_mod.Settings) -> bool:
-    configured_base = (s.provider_config.get("openai", {}).get("base_url") or "").strip()
-    if s.api_keys.get("openai") and is_ollama_cloud_base(configured_base):
-        return True
-    return any(
-        m.get("credential") == "openai"
-        and m.get("model_id") == PREV1_OLLAMA_MODEL_ID
-        and is_ollama_cloud_base(m.get("base_url_override") or configured_base)
-        for m in s.custom_models
-    )
-
-
-def prev1_ollama_model(s: settings_mod.Settings) -> dict | None:
-    """The first pre-v1 release intentionally exposes one known-good model.
-
-    Older onboarding builds could persist other Ollama Cloud catalog entries.
-    Returning a synthesized stable model keeps the UI and chat backend usable
-    after users update from those builds.
-    """
-    if not _has_ollama_cloud_setup(s):
-        return None
-    cred = resolve("openai", s, PREV1_OLLAMA_BASE_URL)
-    return {
-        "id": PREV1_OLLAMA_ZWORK_ID,
-        "name": PREV1_OLLAMA_MODEL_NAME,
-        "subtitle": f"Ollama Cloud · {PREV1_OLLAMA_BASE_URL}",
-        "shape": "openai",
-        "credential": "openai",
-        "model_id": PREV1_OLLAMA_MODEL_ID,
-        "base_url_override": PREV1_OLLAMA_BASE_URL,
-        "configured": bool(cred),
-        "synthesized": True,
-    }
-
-
 def resolve(credential: str, s: settings_mod.Settings, override_base_url: str = "") -> Optional[Credentials]:
     shape = _shape_for_credential(credential)
 
@@ -146,15 +107,9 @@ def resolve(credential: str, s: settings_mod.Settings, override_base_url: str = 
             base = selected_base or (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1")
             return Credentials("openai", env, base.rstrip("/"), "env")
 
-        ollama_base = (os.environ.get("OLLAMA_BASE_URL") or "").strip()
-        ollama = os.environ.get("OLLAMA_API_KEY")
-        if ollama:
-            base = selected_base or (ollama_base or "https://ollama.com/v1")
-            return Credentials("openai", ollama, base.rstrip("/"), "env")
-
-        # Allow local OLLAMA_BASE_URL setups without auth token.
-        if _is_local_ollama_base(selected_base or ollama_base):
-            base = selected_base or ollama_base or "http://localhost:11434/v1"
+        # Allow local Ollama-compatible setups without auth token.
+        if _is_local_ollama_base(selected_base):
+            base = selected_base or "http://localhost:11434/v1"
             return Credentials("openai", "", base.rstrip("/"), "env")
 
         return None
@@ -189,10 +144,6 @@ def credential_status(s: settings_mod.Settings) -> dict:
 # ---------------- Dynamic model list ----------------
 
 def available_models(s: settings_mod.Settings) -> list[dict]:
-    prev1 = prev1_ollama_model(s)
-    if prev1 is not None:
-        return [prev1]
-
     out: list[dict] = []
 
     cc = resolve("claude_code", s)
@@ -425,6 +376,7 @@ async def _openai_turn(
     creds: Credentials,
     messages: list[dict],
     model_id: str,
+    extra_headers: Optional[dict[str, str]] = None,
 ) -> AsyncIterator[dict]:
     """One OpenAI-compatible turn with tool use.
 
@@ -435,6 +387,8 @@ async def _openai_turn(
     headers = {"content-type": "application/json"}
     if creds.api_key:
         headers["authorization"] = f"Bearer {creds.api_key}"
+    if extra_headers:
+        headers.update(extra_headers)
     body = {
         "model": model_id,
         "stream": True,
@@ -455,7 +409,12 @@ async def _openai_turn(
                 if resp.status_code >= 400:
                     text = (await resp.aread()).decode("utf-8", errors="replace")
                     detail = text[:500]
-                    if resp.status_code == 401 and "ollama" in creds.base_url.lower():
+                    if resp.status_code == 401 and "api.tryzwork.app" in creds.base_url.lower():
+                        detail = (
+                            "401 unauthorized from zWork Router. "
+                            "Sign in again or reactivate managed mode from Analytics."
+                        )
+                    elif resp.status_code == 401 and "ollama" in creds.base_url.lower():
                         detail = (
                             "401 unauthorized from Ollama endpoint. "
                             "If using ollama.com cloud, set a valid API key; "
@@ -464,6 +423,16 @@ async def _openai_turn(
                     yield {"type": "error", "text": f"{resp.status_code}: {detail}"}
                     yield {"type": "turn_end", "content_blocks": [], "stop_reason": "error"}
                     return
+                router_provider = resp.headers.get("x-zwork-router-provider") or ""
+                router_model = resp.headers.get("x-zwork-router-model") or model_id
+                router_label = resp.headers.get("x-zwork-router-label") or ""
+                if router_provider or router_label:
+                    yield {
+                        "type": "meta",
+                        "provider": router_label or router_provider,
+                        "resolved_model": router_model,
+                        "upstream_provider": router_provider or router_label,
+                    }
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
@@ -689,9 +658,19 @@ async def _run_openai_loop(
     model_id: str,
 ) -> AsyncIterator[dict]:
     """Multi-turn tool loop for OpenAI-shape APIs."""
+    run_id = str(uuid.uuid4())
     for turn in range(MAX_TURNS):
         content_blocks: list[dict] = []
-        async for evt in _openai_turn(creds, messages, model_id):
+        request_kind = "root" if turn == 0 else "continuation"
+        async for evt in _openai_turn(
+            creds,
+            messages,
+            model_id,
+            extra_headers={
+                "x-zwork-run-id": run_id,
+                "x-zwork-request-kind": request_kind,
+            },
+        ):
             t = evt.get("type")
             if t == "turn_end":
                 content_blocks = evt.get("content_blocks") or []

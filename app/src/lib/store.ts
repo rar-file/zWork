@@ -13,6 +13,16 @@ import {
 import { fetchCloudSession, logoutCloudSession, startDesktopGoogleSignIn } from "./cloud";
 import { setTelemetryEnabled, trackError, trackArtifactCreated } from "./telemetry";
 
+const LEGACY_MANAGED_BASE_URLS = new Set(["https://ollama.com/v1"]);
+const LEGACY_MANAGED_MODEL_IDS = new Set([
+  "ollama-minimax-m2-7-cloud",
+  "zwork-managed-proxy",
+  "minimax-m2.7:cloud",
+]);
+const ROUTER_MODEL_ID = "zwork-router";
+const ROUTER_MODEL_NAME = "zWork Router";
+const ROUTER_BASE_URL = "https://api.tryzwork.app/api/v1";
+
 export type Role = "user" | "assistant";
 
 export interface Message {
@@ -20,6 +30,9 @@ export interface Message {
   role: Role;
   content: string;
   createdAt: number;
+  providerLabel?: string;
+  resolvedModel?: string;
+  upstreamProvider?: string;
   /** Tool calls / steps performed during this assistant turn. */
   activities?: Activity[];
 }
@@ -163,6 +176,40 @@ function stripArtifactJunk(text: string): string {
   out = out.replace(/^here(?:'|’)s the artifact:?\s*$/i, "Here's the artifact:");
   out = out.replace(/\n{3,}/g, "\n\n").trim();
   return out;
+}
+
+function needsManagedRouterMigration(settings: SettingsPublic): boolean {
+  const baseUrl = settings.provider_config?.openai?.base_url || "";
+  const defaultModel = settings.default_model || "";
+  const customModels = settings.custom_models || [];
+  const hasLegacyCustomModel = customModels.some((model) => LEGACY_MANAGED_MODEL_IDS.has(model.id) || LEGACY_MANAGED_MODEL_IDS.has(model.model_id));
+  return LEGACY_MANAGED_BASE_URLS.has(baseUrl) || LEGACY_MANAGED_MODEL_IDS.has(defaultModel) || hasLegacyCustomModel;
+}
+
+async function migrateManagedRouterSettings(settings: SettingsPublic): Promise<SettingsPublic> {
+  await api.putSettings({
+    provider_config: {
+      openai: { base_url: ROUTER_BASE_URL },
+    },
+    default_model: ROUTER_MODEL_ID,
+  });
+
+  for (const model of settings.custom_models || []) {
+    if (LEGACY_MANAGED_MODEL_IDS.has(model.id) || LEGACY_MANAGED_MODEL_IDS.has(model.model_id)) {
+      await api.deleteCustomModel(model.id);
+    }
+  }
+
+  await api.upsertCustomModel({
+    id: ROUTER_MODEL_ID,
+    name: ROUTER_MODEL_NAME,
+    shape: "openai",
+    credential: "openai",
+    model_id: ROUTER_MODEL_ID,
+    base_url_override: ROUTER_BASE_URL,
+  });
+
+  return await api.getSettings();
 }
 
 export interface User {
@@ -505,7 +552,10 @@ export const useApp = create<AppState>((set, get) => ({
 
   refreshSettings: async () => {
     try {
-      const s = await api.getSettings();
+      let s = await api.getSettings();
+      if (needsManagedRouterMigration(s)) {
+        s = await migrateManagedRouterSettings(s);
+      }
       set({ settings: s });
       setTelemetryEnabled(!!s.telemetry_enabled);
     } catch {
@@ -781,6 +831,27 @@ export const useApp = create<AppState>((set, get) => ({
               if (!c) return s;
               const msgs = c.messages.map((m) =>
                 m.id === asstId ? { ...m, content: m.content + evt.text } : m,
+              );
+              return {
+                chats: {
+                  ...s.chats,
+                  [localId]: { ...c, messages: msgs },
+                },
+              };
+            });
+          } else if (evt.type === "meta") {
+            set((s) => {
+              const c = s.chats[localId];
+              if (!c) return s;
+              const msgs = c.messages.map((m) =>
+                m.id === asstId
+                  ? {
+                      ...m,
+                      providerLabel: evt.provider,
+                      resolvedModel: evt.resolved_model,
+                      upstreamProvider: evt.upstream_provider,
+                    }
+                  : m,
               );
               return {
                 chats: {

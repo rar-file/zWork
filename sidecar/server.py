@@ -500,12 +500,6 @@ async def onboard_complete(body: OnboardBody) -> dict:
         model_id = cred.get("model_id", "")
         model_name = cred.get("model_name", model_id)
 
-        if credkey == "openai" and providers.is_ollama_cloud_base(base_url):
-            shape = "openai"
-            base_url = providers.PREV1_OLLAMA_BASE_URL
-            model_id = providers.PREV1_OLLAMA_MODEL_ID
-            model_name = providers.PREV1_OLLAMA_MODEL_NAME
-
         if credkey in ("anthropic", "openai") and api_key:
             s.api_keys[credkey] = api_key
         if base_url:
@@ -513,7 +507,7 @@ async def onboard_complete(body: OnboardBody) -> dict:
         if model_id:
             m = settings_mod.upsert_custom_model(
                 s,
-                id=providers.PREV1_OLLAMA_ZWORK_ID if model_id == providers.PREV1_OLLAMA_MODEL_ID else None,
+                id=providers.ZWORK_ROUTER_ZWORK_ID if model_id == providers.ZWORK_ROUTER_MODEL_ID else None,
                 name=model_name,
                 shape=shape,
                 credential=credkey,

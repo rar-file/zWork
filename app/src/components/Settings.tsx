@@ -20,21 +20,28 @@ import {
   FileText,
   User,
   LogOut,
+  Shield,
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { useApp } from "../lib/store";
 import { isMacOS } from "../lib/platform";
 import { fallbackAppVersion, resolveAppVersion } from "../lib/appVersion";
+import { fetchAnalyticsSummary, type AnalyticsSummary } from "../lib/cloud";
 import { IconButton } from "./IconButton";
 import type { Integration } from "../lib/api";
 
-type Section = "account" | "general" | "memory" | "personalization" | "models" | "integrations";
+type Section = "account" | "plan" | "general" | "memory" | "personalization" | "models" | "integrations";
 
 const SECTION_META: Record<Section, { title: string; description: string; icon: React.ReactNode }> = {
   account: {
     title: "Account",
     description: "Sign in with Google to sync your data.",
     icon: <User className="h-4 w-4" />,
+  },
+  plan: {
+    title: "Plan",
+    description: "Quota, hosted routing, and account access.",
+    icon: <Shield className="h-4 w-4" />,
   },
   general: {
     title: "General",
@@ -148,6 +155,7 @@ export function SettingsPage() {
           {/* Content area */}
           <div className="min-w-0 flex-1 px-5 lg:px-0 py-5 space-y-5">
             {section === "account" && <AccountPanel />}
+            {section === "plan" && <PlanPanel />}
             {section === "models" && (
               <ModelsPanel
                 providers={providers}
@@ -816,6 +824,129 @@ function PersonalizationPanel() {
 }
 
 // ---------------- Account ----------------
+
+function PlanPanel() {
+  const user = useApp((s) => s.user);
+  const setView = useApp((s) => s.setView);
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    void fetchAnalyticsSummary()
+      .then((data) => {
+        if (!alive) return;
+        setSummary(data);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setSummary(null);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const remaining5h = Math.max((summary?.five_hour_limit || 0) - (summary?.five_hour_used || 0), 0);
+  const remainingWeek = Math.max((summary?.weekly_limit || 0) - (summary?.weekly_used || 0), 0);
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-[17px] font-semibold tracking-tight text-ink">Plan</h2>
+        <p className="mt-1 text-[13px] leading-5 text-ink-muted">
+          Manage your hosted access, review quota state, and control how zWork Router is used on this device.
+        </p>
+      </div>
+
+      <section className="rounded-2xl border border-line bg-paper-raised p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-faint">Current plan</div>
+            <div className="mt-3 text-[28px] font-light tracking-tight text-ink">
+              {user?.tier === "pro" ? "zWork Pro" : "zWork Free"}
+            </div>
+            <p className="mt-2 max-w-[58ch] text-[13px] leading-6 text-ink-muted">
+              {user?.tier === "pro"
+                ? "Hosted routing is unlocked on this account. Use Analytics to activate zWork Router and watch rolling quota in real time."
+                : "This account is still on the free tier. Unlock Pro with an access code or future billing flow before switching traffic onto the hosted router."}
+            </p>
+          </div>
+          <span className="rounded-full border border-line bg-paper px-3 py-1 text-[12px] font-medium text-ink">
+            {user?.tier === "pro" ? "Pro" : "Free"}
+          </span>
+        </div>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setView("analytics")}
+            className="press rounded-full bg-ink px-4 py-2 text-[12.5px] font-medium text-paper hover:bg-ink-soft"
+          >
+            Open quota dashboard
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("analytics")}
+            className="press rounded-full border border-line bg-paper px-4 py-2 text-[12.5px] font-medium text-ink hover:bg-paper-sunken"
+          >
+            Manage hosted mode
+          </button>
+        </div>
+        <div className="mt-5 grid gap-3 md:grid-cols-3">
+          <div className="rounded-xl border border-line bg-paper px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-faint">5 hour runway</div>
+            <div className="mt-2 text-[24px] font-light tracking-tight text-ink">
+              {loading ? "…" : remaining5h}
+            </div>
+            <div className="mt-1 text-[12px] leading-5 text-ink-muted">
+              {loading ? "Loading quota…" : `${summary?.five_hour_used || 0} used of ${summary?.five_hour_limit || 0}`}
+            </div>
+          </div>
+          <div className="rounded-xl border border-line bg-paper px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-faint">Weekly runway</div>
+            <div className="mt-2 text-[24px] font-light tracking-tight text-ink">
+              {loading ? "…" : remainingWeek}
+            </div>
+            <div className="mt-1 text-[12px] leading-5 text-ink-muted">
+              {loading ? "Loading quota…" : `${summary?.weekly_used || 0} used of ${summary?.weekly_limit || 0}`}
+            </div>
+          </div>
+          <div className="rounded-xl border border-line bg-paper px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-faint">Hosted route</div>
+            <div className="mt-2 text-[16px] font-medium text-ink">
+              {loading ? "Checking…" : summary?.managed_gateway_ready ? "Ready" : "Unavailable"}
+            </div>
+            <div className="mt-1 text-[12px] leading-5 text-ink-muted">
+              {loading ? "Loading route status…" : summary?.managed_gateway_status || "No hosted route status yet."}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-line bg-paper-raised p-5">
+        <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-ink-faint">What lives where</div>
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <div className="rounded-xl border border-line bg-paper px-4 py-3">
+            <div className="text-[13px] font-medium text-ink">Account</div>
+            <div className="mt-1 text-[12px] leading-5 text-ink-muted">Identity, plan, access code, and hosted quota.</div>
+          </div>
+          <div className="rounded-xl border border-line bg-paper px-4 py-3">
+            <div className="text-[13px] font-medium text-ink">Analytics</div>
+            <div className="mt-1 text-[12px] leading-5 text-ink-muted">Five-hour and weekly runway, trend graph, and hosted route status.</div>
+          </div>
+          <div className="rounded-xl border border-line bg-paper px-4 py-3">
+            <div className="text-[13px] font-medium text-ink">Models</div>
+            <div className="mt-1 text-[12px] leading-5 text-ink-muted">Bring-your-own keys and local model configuration when you do not want hosted routing.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 function AccountPanel() {
   const user = useApp((s) => s.user);

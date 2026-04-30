@@ -338,7 +338,15 @@ export function Message({
           </div>
         )}
 
-        <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className={cn(
+          "mt-1 flex items-center gap-0.5 transition-opacity",
+          message.resolvedModel ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+        )}>
+          {message.resolvedModel && (
+            <span className="inline-flex items-center rounded-full border border-line bg-paper-sunken px-2 py-0.5 text-[10.5px] text-ink-muted">
+              {message.providerLabel || "Model"}: {message.resolvedModel}
+            </span>
+          )}
           <IconButton icon={<Copy />} label="Copy" size="sm" />
           <IconButton icon={<RefreshCcw />} label="Regenerate" size="sm" />
           <IconButton icon={<ThumbsDown />} label="Bad response" size="sm" />

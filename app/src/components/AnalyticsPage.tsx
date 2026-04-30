@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, BarChart3, ExternalLink, Rocket, Shield, Zap } from "lucide-react";
+import { Activity, BarChart3, ExternalLink, Shield, Zap } from "lucide-react";
 import { api } from "../lib/api";
 import {
   clearManagedBackup,
@@ -14,9 +14,9 @@ import {
 import { recordTelemetry } from "../lib/telemetry";
 import { useApp } from "../lib/store";
 
-const MANAGED_MODEL_ID = "zwork-managed-proxy";
+const MANAGED_MODEL_ID = "zwork-router";
 const MANAGED_BASE_URL = "https://api.tryzwork.app/api/v1";
-const MANAGED_MODEL_NAME = "zWork Managed";
+const MANAGED_MODEL_NAME = "zWork Router";
 
 function StatCard({
   label,
@@ -41,6 +41,47 @@ function StatCard({
   );
 }
 
+function ProgressQuotaCard({
+  label,
+  used,
+  limit,
+  hint,
+}: {
+  label: string;
+  used: number;
+  limit: number;
+  hint: string;
+}) {
+  const remaining = Math.max(limit - used, 0);
+  const percentRemaining = limit > 0 ? Math.max(0, Math.min(100, (remaining / limit) * 100)) : 0;
+  const tone =
+    percentRemaining <= 10 ? "bg-[#dc2626]"
+      : percentRemaining <= 25 ? "bg-[#f59e0b]"
+        : "bg-[#15803d]";
+
+  return (
+    <div className="rounded-[28px] border border-line bg-paper-raised p-5 shadow-[0_10px_40px_rgba(17,17,17,0.05)]">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-faint">{label}</div>
+          <div className="mt-3 text-[28px] font-light tracking-tight text-ink">
+            {remaining}
+            <span className="ml-1 text-[14px] text-ink-muted">left</span>
+          </div>
+        </div>
+        <div className="text-right text-[12px] text-ink-muted">
+          <div>{used} used</div>
+          <div>{limit} total</div>
+        </div>
+      </div>
+      <div className="mt-4 h-3 overflow-hidden rounded-full bg-[#d7d7d1]">
+        <div className={`h-full rounded-full transition-[width] duration-300 ${tone}`} style={{ width: `${percentRemaining}%` }} />
+      </div>
+      <div className="mt-2 text-[12.5px] leading-5 text-ink-muted">{hint}</div>
+    </div>
+  );
+}
+
 export function AnalyticsPage({
   cloudUser,
   onCloudUserChange,
@@ -61,6 +102,7 @@ export function AnalyticsPage({
   const [routeBusy, setRouteBusy] = useState(false);
   const [routeError, setRouteError] = useState<string | null>(null);
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const [trendRange, setTrendRange] = useState<"7d" | "1m">("7d");
 
   useEffect(() => {
     let alive = true;
@@ -112,7 +154,7 @@ export function AnalyticsPage({
         name: MANAGED_MODEL_NAME,
         shape: "openai",
         credential: "openai",
-        model_id: "minimax-m2.7:cloud",
+        model_id: MANAGED_MODEL_ID,
         base_url_override: MANAGED_BASE_URL,
       });
       await api.putSettings({ default_model: MANAGED_MODEL_ID });
@@ -179,8 +221,10 @@ export function AnalyticsPage({
     }
   };
 
-  const maxDay = Math.max(1, ...(summary?.past_week.map((day) => day.roots + day.continuations) || [1]));
+  const trendData = trendRange === "1m" ? (summary?.past_month || []) : (summary?.past_week || []);
+  const maxDay = Math.max(1, ...(trendData.map((day) => day.roots) || [1]));
   const user = summary?.user || cloudUser;
+  const ownerProviders = summary?.owner_provider_overview || [];
 
   return (
     <div className="flex h-full min-w-0 flex-1 overflow-y-auto bg-paper">
@@ -212,38 +256,68 @@ export function AnalyticsPage({
           </div>
         </section>
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <StatCard label="Today" value={loading ? "…" : String(summary?.root_requests_today || 0)} hint="User-initiated root requests in the current day." icon={<Rocket className="h-4 w-4" />} />
-          <StatCard label="Continuations" value={loading ? "…" : String(summary?.continuation_requests_today || 0)} hint="Tool and follow-up model turns today." icon={<Zap className="h-4 w-4" />} />
-          <StatCard label="Active runs" value={loading ? "…" : String(summary?.active_runs || 0)} hint="Currently live root runs still in flight." icon={<Activity className="h-4 w-4" />} />
-          <StatCard label="Tier" value={user.tier === "pro" ? "Pro" : "Free"} hint={user.access_code || user.coupon_code ? `Code: ${user.access_code || user.coupon_code}` : "No access code applied yet."} icon={<Shield className="h-4 w-4" />} />
+        <section className="grid gap-4 xl:grid-cols-2">
+          <ProgressQuotaCard
+            label="5 Hour Limit"
+            used={loading ? 0 : (summary?.five_hour_used || 0)}
+            limit={loading ? 0 : (summary?.five_hour_limit || 0)}
+            hint="Rolling product quota for user-initiated runs in the last five hours."
+          />
+          <ProgressQuotaCard
+            label="Weekly Limit"
+            used={loading ? 0 : (summary?.weekly_used || 0)}
+            limit={loading ? 0 : (summary?.weekly_limit || 0)}
+            hint="Rolling seven-day budget. This resets gradually as older usage falls out of the window."
+          />
+        </section>
+
+        <section className="grid gap-4 md:grid-cols-3">
+          <StatCard label="Plan" value={user.tier === "pro" ? "Pro" : "Free"} hint={user.access_code || user.coupon_code ? `Code: ${user.access_code || user.coupon_code}` : "No access code applied yet."} icon={<Shield className="h-4 w-4" />} />
+          <StatCard label="Active Runs" value={loading ? "…" : String(summary?.active_runs || 0)} hint="Concurrent root runs still in flight right now." icon={<Activity className="h-4 w-4" />} />
+          <StatCard label="Continuations" value={loading ? "…" : String(summary?.continuation_requests_today || 0)} hint="Internal tool/model turns today. These do not burn root quota directly." icon={<Zap className="h-4 w-4" />} />
         </section>
 
         <section className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
           <div className="rounded-[28px] border border-line bg-paper-raised p-6">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-[18px] font-semibold tracking-tight text-ink">Usage curve</h2>
-                <p className="mt-1 text-[13px] text-ink-muted">Root requests and continuation turns over the last week.</p>
+                <h2 className="text-[18px] font-semibold tracking-tight text-ink">Usage trend</h2>
+                <p className="mt-1 text-[13px] text-ink-muted">Root-request volume over time so users can see pace before they slam into quota.</p>
               </div>
-              <BarChart3 className="h-5 w-5 text-ink-faint" />
+              <div className="flex items-center gap-2">
+                <div className="rounded-full border border-line bg-paper-sunken p-1">
+                  <button
+                    type="button"
+                    onClick={() => setTrendRange("7d")}
+                    className={`rounded-full px-3 py-1 text-[11px] font-medium ${trendRange === "7d" ? "bg-ink text-paper" : "text-ink-muted"}`}
+                  >
+                    7d
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTrendRange("1m")}
+                    className={`rounded-full px-3 py-1 text-[11px] font-medium ${trendRange === "1m" ? "bg-ink text-paper" : "text-ink-muted"}`}
+                  >
+                    1m
+                  </button>
+                </div>
+                <BarChart3 className="h-5 w-5 text-ink-faint" />
+              </div>
             </div>
-            <div className="mt-6 grid grid-cols-7 gap-3">
-              {(summary?.past_week || []).map((day) => {
-                const total = day.roots + day.continuations;
-                const height = `${Math.max(8, (total / maxDay) * 140)}px`;
+            <div
+              className="mt-6 grid gap-3"
+              style={{ gridTemplateColumns: `repeat(${Math.max(trendData.length, 1)}, minmax(0, 1fr))` }}
+            >
+              {trendData.map((day) => {
+                const height = `${Math.max(8, (day.roots / maxDay) * 180)}px`;
                 return (
                   <div key={day.day} className="flex flex-col items-center gap-2">
-                    <div className="flex h-[160px] w-full items-end justify-center rounded-[22px] bg-paper-sunken px-2 pb-2">
+                    <div className="flex h-[200px] w-full items-end justify-center rounded-[22px] bg-paper-sunken px-2 pb-2">
                       <div
                         className="flex w-full flex-col overflow-hidden rounded-[16px] border border-line/70 bg-white/80"
                         style={{ height }}
                       >
-                        <div
-                          className="bg-[#151313]"
-                          style={{ height: `${total === 0 ? 0 : (day.roots / total) * 100}%` }}
-                        />
-                        <div className="flex-1 bg-[#0f766e]" />
+                        <div className="flex-1 bg-[#15803d]" />
                       </div>
                     </div>
                     <div className="text-center text-[11px] text-ink-muted">
@@ -260,7 +334,7 @@ export function AnalyticsPage({
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-faint">Managed route</div>
               <h2 className="mt-3 text-[20px] font-semibold tracking-tight text-ink">Use the hosted gateway</h2>
               <p className="mt-2 text-[13px] leading-6 text-ink-muted">
-                This repoints the local sidecar to your server gateway with your signed-in desktop token, while keeping the agent loop local on-device.
+                This repoints the local sidecar to {summary?.router_label || "zWork Router"} with your signed-in desktop token, while keeping the agent loop local on-device.
               </p>
               <div className="mt-5 flex flex-wrap gap-2">
                 {managedActive ? (
@@ -352,6 +426,62 @@ export function AnalyticsPage({
             </a>
           ))}
         </section>
+
+        {ownerProviders.length > 0 && (
+          <section className="rounded-[28px] border border-line bg-paper-raised p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-faint">Owner view</div>
+                <h2 className="mt-3 text-[20px] font-semibold tracking-tight text-ink">Provider usage overview</h2>
+                <p className="mt-2 text-[13px] leading-6 text-ink-muted">
+                  Seven-day request and token volume across the hosted router, plus the latest observed provider headroom when the upstream exposes it.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 grid gap-4 lg:grid-cols-3">
+              {ownerProviders.map((provider) => (
+                <div key={provider.provider_name} className="rounded-[22px] border border-line bg-paper p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-[15px] font-semibold text-ink">{provider.provider_name}</div>
+                      <div className="mt-1 text-[12px] text-ink-muted">
+                        {provider.last_model_id || "No recent model recorded"}
+                      </div>
+                    </div>
+                    <div className="rounded-full border border-line bg-paper-sunken px-2.5 py-1 text-[11px] text-ink-muted">
+                      {provider.last_status ? `HTTP ${provider.last_status}` : "No status"}
+                    </div>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-ink-faint">7d requests</div>
+                      <div className="mt-1 text-[22px] font-light tracking-tight text-ink">{provider.requests_7d}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.16em] text-ink-faint">7d tokens</div>
+                      <div className="mt-1 text-[22px] font-light tracking-tight text-ink">{provider.total_tokens_7d}</div>
+                    </div>
+                  </div>
+                  <div className="mt-4 space-y-1 text-[12px] text-ink-muted">
+                    <div>Roots: {provider.roots_7d} • Continuations: {provider.continuations_7d}</div>
+                    <div>Prompt: {provider.prompt_tokens_7d} • Completion: {provider.completion_tokens_7d}</div>
+                    <div>
+                      Remaining req/day: {provider.requests_remaining_day ?? "n/a"}
+                      {provider.requests_limit_day ? ` / ${provider.requests_limit_day}` : ""}
+                    </div>
+                    <div>
+                      Remaining tok/min: {provider.tokens_remaining_minute ?? "n/a"}
+                      {provider.tokens_limit_minute ? ` / ${provider.tokens_limit_minute}` : ""}
+                    </div>
+                    <div>
+                      Last seen: {provider.last_observed_at ? new Date(provider.last_observed_at).toLocaleString() : "n/a"}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );

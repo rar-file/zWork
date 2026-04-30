@@ -20,7 +20,6 @@ export type UpdateProgress =
   | { phase: "relaunching" }
   | { phase: "error"; message: string };
 
-const releaseRepo = "https://api.github.com/repos/Ryz3nPlayZ/zWork/releases/latest";
 const releasePage = "https://github.com/Ryz3nPlayZ/zWork/releases/latest";
 const lastInstalledUpdateKey = "zwork:last-installed-update";
 
@@ -99,33 +98,9 @@ async function checkTauriUpdater(currentVersionParts: SemverVersion): Promise<Up
   }
 }
 
-async function checkGithubRelease(currentVersion: string, currentVersionParts: SemverVersion): Promise<UpdateCardState | null> {
-  try {
-    const response = await fetch(releaseRepo, {
-      headers: { accept: "application/vnd.github+json" },
-    });
-    if (!response.ok) return null;
-
-    const data = (await response.json()) as { tag_name?: string; html_url?: string; body?: string };
-    const latestVersion = normalizeVersion(data.tag_name || "");
-    if (!latestVersion) return null;
-    if (compareVersions(parseVersion(latestVersion), currentVersionParts) <= 0) return null;
-
-    return {
-      currentVersion: normalizeVersion(currentVersion),
-      latestVersion,
-      releaseUrl: data.html_url || releasePage,
-      notes: data.body || undefined,
-      source: "github",
-    };
-  } catch {
-    return null;
-  }
-}
-
 export async function detectUpdate(currentVersion: string): Promise<UpdateCardState | null> {
   const currentVersionParts = parseVersion(currentVersion);
-  return (await checkTauriUpdater(currentVersionParts)) || (await checkGithubRelease(currentVersion, currentVersionParts));
+  return await checkTauriUpdater(currentVersionParts);
 }
 
 export async function installUpdate(

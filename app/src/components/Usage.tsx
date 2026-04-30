@@ -56,7 +56,7 @@ export function UsagePage() {
             <h2 className="text-sm font-medium text-ink mb-3">Model Breakdown</h2>
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-ink-muted">minimax-m2.7:cloud</span>
+                <span className="text-ink-muted">zWork Router</span>
                 <span className="text-ink">0 requests</span>
               </div>
             </div>

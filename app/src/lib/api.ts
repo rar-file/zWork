@@ -363,6 +363,7 @@ export type StreamEvent =
   | { type: "chat"; id: string; title: string }
   | { type: "status"; text: string }
   | { type: "delta"; text: string }
+  | { type: "meta"; provider: string; resolved_model: string; upstream_provider?: string }
   | { type: "done" }
   | { type: "end" }
   | { type: "heartbeat" }

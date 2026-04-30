@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowRight, ArrowLeft, Check, ChevronDown, ExternalLink, Sparkles } from "lucide-react";
+import { ArrowRight, ArrowLeft, Check, ChevronDown, Sparkles } from "lucide-react";
 import { Logo } from "./Logo";
 import { cn } from "../lib/cn";
 import { useApp } from "../lib/store";
@@ -10,7 +10,7 @@ import { isMacOS } from "../lib/platform";
 import { api, type OnboardingAnswer, type OnboardingCredential } from "../lib/api";
 import LightRays from "./LightRays";
 
-const PREV1_OLLAMA_MODEL_ID = "minimax-m2.7:cloud";
+const ZWORK_ROUTER_MODEL_ID = "zwork-router";
 
 /* ------------------------------------------------------------------ *
  *  Question model
@@ -182,7 +182,7 @@ const QUESTIONS: Question[] = [
  * ------------------------------------------------------------------ */
 
 interface CredentialPreset {
-  id: "zwork_managed" | "claude_code" | "ollama" | "openai" | "anthropic";
+  id: "zwork_managed" | "claude_code" | "openai" | "anthropic";
   label: string;
   subtitle: string;
   shape: "anthropic" | "openai";
@@ -191,35 +191,21 @@ interface CredentialPreset {
   defaultModelId: string;
   keyless?: boolean;
   managed?: boolean;
-  helpUrl?: string;
   recommended?: boolean;
-  isOllama?: boolean;
 }
 
 const PRESETS: CredentialPreset[] = [
   {
     id: "zwork_managed",
-    label: "zWork Managed",
-    subtitle: "Use the hosted zWork gateway with your signed-in account",
+    label: "zWork Router",
+    subtitle: "Use the hosted zWork router with your signed-in account",
     shape: "openai",
     credential: "openai",
     defaultBaseUrl: "https://api.tryzwork.app/api/v1",
-    defaultModelId: "minimax-m2.7:cloud",
+    defaultModelId: ZWORK_ROUTER_MODEL_ID,
     keyless: true,
     managed: true,
     recommended: true,
-  },
-  {
-    id: "ollama",
-    label: "Ollama",
-    subtitle: "Free cloud models, or run locally — our pick",
-    shape: "openai",
-    credential: "openai",
-    defaultBaseUrl: "https://ollama.com/v1",
-    defaultModelId: "minimax-m2.7:cloud",
-    helpUrl: "#ollama-help",
-    recommended: true,
-    isOllama: true,
   },
   {
     id: "claude_code",
@@ -268,18 +254,10 @@ export interface ModelChoice {
 export const MODEL_CATALOG: Record<CredentialPreset["id"], ModelChoice[]> = {
   zwork_managed: [
     {
-      id: PREV1_OLLAMA_MODEL_ID,
-      label: "MiniMax M2.7",
-      description: "Hosted through the zWork gateway with your signed-in account.",
+      id: ZWORK_ROUTER_MODEL_ID,
+      label: "zWork Router",
+      description: "Hosted through the zWork router with automatic provider fallback.",
       cost: "Managed by zWork",
-    },
-  ],
-  ollama: [
-    {
-      id: PREV1_OLLAMA_MODEL_ID,
-      label: "MiniMax M2.7",
-      description: "Huge context window — great for long docs & code.",
-      cost: "Free tier on Ollama Cloud",
     },
   ],
   openai: [
@@ -344,7 +322,6 @@ export function Onboarding() {
     name: me?.name?.split(/\s+/)[0] || "",
   }));
   const [credential, setCredential] = useState<OnboardingCredential | null>(null);
-  const [showHelp, setShowHelp] = useState<"ollama" | null>(null);
   const [error, setError] = useState("");
 
   // Final "Personalizing..." phase
@@ -568,7 +545,6 @@ export function Onboarding() {
                         <ApiKeyStep
                           initial={credential}
                           onChange={onSubmitCredential}
-                          onHelp={(which) => setShowHelp(which)}
                         />
                       )}
                     </div>
@@ -629,13 +605,6 @@ export function Onboarding() {
           </div>
         </motion.div>
       </div>
-
-      {/* Ollama help panel */}
-      <AnimatePresence>
-        {showHelp === "ollama" && (
-          <OllamaHelpSheet onClose={() => setShowHelp(null)} />
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -849,11 +818,9 @@ function ChoiceList({
 function ApiKeyStep({
   initial,
   onChange,
-  onHelp,
 }: {
   initial: OnboardingCredential | null;
   onChange: (c: OnboardingCredential | null) => void;
-  onHelp: (which: "ollama") => void;
 }) {
   const user = useApp((s) => s.user);
   const hasCloudToken = typeof window !== "undefined" && !!window.localStorage.getItem("zwork:cloud-token");
@@ -1100,16 +1067,6 @@ function ApiKeyStep({
               apply({ preset, apiKey, baseUrl, modelId: id });
             }}
           />
-
-          {preset.helpUrl === "#ollama-help" && (
-            <button
-              type="button"
-              onClick={() => onHelp("ollama")}
-              className="press mt-1 inline-flex items-center gap-1 self-start text-[12px] text-ink-muted hover:text-ink"
-            >
-              <ExternalLink className="h-3 w-3" /> Step-by-step Ollama setup
-            </button>
-          )}
         </motion.div>
       )}
 
@@ -1280,115 +1237,5 @@ function FinalizingScreen({ done }: { done: boolean }) {
         {label}
       </motion.span>
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------ *
- *  Ollama help sheet
- * ------------------------------------------------------------------ */
-
-function OllamaHelpSheet({ onClose }: { onClose: () => void }) {
-  const [tab, setTab] = useState<"cloud" | "local">("cloud");
-
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="onboarding-shell fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6"
-      onClick={onClose}
-    >
-      <motion.div
-        initial={{ scale: 0.96, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.96, opacity: 0 }}
-        transition={{ duration: 0.18 }}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[560px] overflow-hidden rounded-2xl border border-line bg-paper-raised shadow-pop"
-      >
-        <div className="border-b border-line px-5 py-3">
-          <h3 className="text-[15px] font-semibold text-ink">Setting up Ollama</h3>
-          <p className="mt-0.5 text-[12px] text-ink-muted">
-            Pick cloud for free hosted models, or local to run models on your own machine.
-          </p>
-        </div>
-
-        {/* Tabs */}
-        <div className="flex border-b border-line px-3">
-          {(["cloud", "local"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setTab(t)}
-              className={cn(
-                "press -mb-px border-b-2 px-3 py-2 text-[12.5px] font-medium capitalize transition-colors",
-                tab === t
-                  ? "border-ink text-ink"
-                  : "border-transparent text-ink-muted hover:text-ink",
-              )}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-
-        <div className="space-y-3 px-5 py-4 text-[13px] leading-relaxed text-ink-soft">
-          {tab === "cloud" ? (
-            <ol className="list-decimal space-y-2 pl-5">
-              <li>
-                Go to{" "}
-                <a href="https://ollama.com" target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:opacity-70">
-                  ollama.com
-                </a>{" "}
-                and <strong>Sign up</strong>.
-              </li>
-              <li>Click your <strong>Profile</strong> → <strong>Settings</strong>.</li>
-              <li>Open the <strong>Keys</strong> tab, then <strong>Add API Key</strong>.</li>
-              <li>Copy the key and paste it into the <strong>API key</strong> field below.</li>
-              <li>
-                Leave Base URL as{" "}
-                <code className="rounded bg-paper-sunken px-1 py-0.5 text-[11.5px]">https://ollama.com/v1</code>.
-                Models will populate automatically once the key is valid.
-              </li>
-            </ol>
-          ) : (
-            <ol className="list-decimal space-y-2 pl-5">
-              <li>
-                Install Ollama from{" "}
-                <a href="https://ollama.com/download" target="_blank" rel="noreferrer" className="underline underline-offset-2 hover:opacity-70">
-                  ollama.com/download
-                </a>.
-              </li>
-              <li>
-                Pull a model in your terminal:
-                <pre className="mt-1.5 overflow-x-auto rounded-md border border-line bg-paper px-3 py-2 font-mono text-[12px]">
-                  ollama pull llama3.1
-                </pre>
-              </li>
-              <li>
-                Leave the <strong>API key blank</strong>.
-              </li>
-              <li>
-                Set Base URL to{" "}
-                <code className="rounded bg-paper-sunken px-1 py-0.5 text-[11.5px]">http://localhost:11434/v1</code>.
-              </li>
-              <li>
-                Model ID is the name you pulled, e.g. <code>llama3.1</code>.
-              </li>
-            </ol>
-          )}
-        </div>
-
-        <div className="flex justify-end border-t border-line px-5 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="press rounded-md border border-line bg-paper px-3 py-1.5 text-[12.5px] text-ink hover:bg-paper-sunken"
-          >
-            Got it
-          </button>
-        </div>
-      </motion.div>
-    </motion.div>
   );
 }

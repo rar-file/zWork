@@ -15,6 +15,19 @@ All notable changes to zWork are documented here.
 - Improved release documentation with troubleshooting section
 - Updated wiki index for better documentation discoverability
 
+## v0.3.18-beta.2
+
+**Router pivot, quota visibility, and updater hardening.**
+
+- replaced the old managed Ollama path with `zWork Router` backed by Groq, Cerebras, and Mistral with ordered fallbacks
+- added automatic migration for older beta installs that still pointed hosted mode at the dead Ollama cloud endpoint
+- surfaced the exact routed model under assistant messages so hosted responses show the real upstream model used
+- redesigned Analytics around rolling `5 hour` and `weekly` quota bars plus 7d/1m usage trends
+- added a real Plan panel in Settings with hosted route status and quota runway
+- normalized hosted upstream JSON responses into SSE on the server so the desktop sidecar can stream managed responses correctly
+- added owner-only provider overview data in analytics, including 7-day request and token totals plus latest observed rate-limit headroom when the provider exposes it
+- removed the fake GitHub fallback from update detection so the app only advertises native updates when an installable updater package actually exists
+
 ## v0.3.18-beta.1
 
 **Beta release for real sign-in, analytics, access codes, and hosted-mode wiring.**
