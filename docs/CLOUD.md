@@ -1,127 +1,131 @@
-# zWork Cloud Infrastructure
+# zWork Cloud Deployment
 
-This document describes the cloud infrastructure powering zWork's backend services.
+This document describes the cloud stack that sits behind `api.tryzwork.app`.
 
-## Architecture Overview
+## Source of truth
 
+Use `cloud-src/` as the checked-in deployment source.
+
+Relevant files:
+
+- `cloud-src/docker-compose.yml`
+- `cloud-src/Caddyfile`
+- `cloud-src/api/src/main.rs`
+- `cloud-src/auth/index.ts`
+- `cloud-src/db/schema.sql`
+
+The older `cloud/` directory is not the deployment source to trust for current behavior.
+
+## Stack
+
+| Service | Path | Responsibility |
+|---------|------|----------------|
+| Caddy | `cloud-src/Caddyfile` | TLS, host routing, reverse proxy |
+| Axum API | `cloud-src/api` | desktop auth exchange, analytics, managed model gateway |
+| Better Auth | `cloud-src/auth` | Google OAuth and session management |
+| Postgres | compose service | auth and zWork app state |
+| pgAdmin | compose service | admin tooling, intentionally not public |
+
+## Public hosts
+
+| Host | Expected purpose | Current posture |
+|------|------------------|-----------------|
+| `api.tryzwork.app` | auth + API | public |
+| `analytics.tryzwork.app` | shortcut to PostHog | public |
+| `db.tryzwork.app` | pgAdmin | blocked with `403` by default |
+
+## Routing model
+
+```mermaid
+flowchart TD
+    Client[Desktop app / sidecar]
+    Caddy[Caddy]
+    Axum[Axum API]
+    Auth[Better Auth]
+    Pg[(Postgres)]
+    PostHog[PostHog]
+    Upstream[Upstream model provider]
+
+    Client --> Caddy
+    Caddy -->|/api/auth/*| Auth
+    Caddy -->|/api/*| Axum
+    Axum --> Pg
+    Auth --> Pg
+    Axum --> PostHog
+    Axum --> Upstream
 ```
-                    +------------------+
-                    |   Cloudflare DNS  |
-                    +--------+---------+
-                             |
-              +--------------+--------------+
-              |                             |
-        +-----v------+              +------v------+
-        |  api.tryzwork.app  |      |  db.tryzwork.app  |
-        |  (Caddy Proxy)     |      |  (pgAdmin)        |
-        +--------+---------+          +-----------------+
-                 |
-       +---------+----------+
-       |                      |
-  +----v-----+          +----v---------+
-  | Axum API |          | Better Auth  |
-  | :8080    |          | :3000        |
-  +----+-----+          +----+---------+
-       |                     |
-       +----------+----------+
-                  |
-           +------v-------+
-           |  PostgreSQL   |
-           |   :5432       |
-           +---------------+
+
+## Environment variables
+
+Minimum server env:
+
+```bash
+DATABASE_URL=postgres://...
+
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+BETTER_AUTH_SECRET=...
+
+POSTHOG_API_KEY=...
+POSTHOG_HOST=https://us.i.posthog.com
+
+OLLAMA_API_KEY=...
+OLLAMA_BASE_URL=https://api.ollama.com/v1
+OLLAMA_MODEL=minimax-m2.7:cloud
+
+ROOT_REQUESTS_PER_DAY=200
+MAX_CONCURRENT_ROOT_RUNS=3
+DEV_COUPON_CODES=zwork-dev-pro
+
+CORS_ALLOWED_ORIGINS=tauri://localhost,http://tauri.localhost,http://localhost:1420,http://127.0.0.1:1420,https://tryzwork.app,https://www.tryzwork.app,https://api.tryzwork.app
 ```
 
-## Services
+Notes:
 
-### Caddy Reverse Proxy
-
-- **Image**: `caddy:2-alpine`
-- **Ports**: `80`, `443` (auto HTTPS via Let's Encrypt)
-- **Config**: `cloud/Caddyfile`
-- **Routes**:
-  - `api.tryzwork.app/api/auth/*` → Better Auth (`better_auth:3000`)
-  - `api.tryzwork.app/api/*` → Axum API (`axum_api:8080`)
-  - `api.tryzwork.app/health` → Axum health check
-  - `db.tryzwork.app` → pgAdmin (`pgadmin:80`)
-  - `analytics.tryzwork.app` → PostHog redirect
-
-### Axum API (Rust)
-
-- **Build**: `cloud/api/Dockerfile`
-- **Port**: `8080`
-- **Features**:
-  - AI proxy to Ollama Cloud (minimax-m2.7:cloud enforced)
-  - Chat streaming (`/api/chat/stream`)
-  - OpenAI-compatible endpoints (`/api/v1/*`)
-  - User management endpoints (`/api/users/*`)
-  - Stripe webhook stub
-  - Telemetry proxy
-
-### Better Auth (Node/Bun)
-
-- **Build**: `cloud/auth/Dockerfile`
-- **Port**: `3000`
-- **Features**:
-  - Email + password authentication
-  - Google OAuth 2.0
-  - Session management
-  - PostgreSQL-backed user storage
-
-### PostgreSQL
-
-- **Image**: `postgres:15-alpine`
-- **Database**: `zwork_db`
-- **User**: `zwork`
-- **Schema**: `cloud/db/schema.sql`
-- **Tables**:
-  - `users` — custom user tracking (tier, subscription)
-  - Better Auth managed tables (auto-created)
-
-### pgAdmin
-
-- **Image**: `dpage/pgadmin4`
-- **Login**: `admin@tryzwork.app` / `zwork_admin_pass`
-- **Access**: `db.tryzwork.app`
+- `OLLAMA_API_KEY` should be provided through env, not embedded in source.
+- If you insist on a non-production fallback for internal testing, use `ZWORK_TEST_OLLAMA_API_KEY` in env rather than checking a token into git.
 
 ## Deployment
 
 ```bash
-cd cloud/
-docker compose up -d --build
+cd ~/cloud
+sudo docker compose up -d --build
 ```
 
-## Environment Variables
-
-Create `cloud/.env`:
+## Health checks
 
 ```bash
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
-BETTER_AUTH_SECRET=...
-STRIPE_SECRET_KEY=...
-STRIPE_WEBHOOK_SECRET=...
-POSTHOG_API_KEY=...
-ANTHROPIC_API_KEY=...
+curl https://api.tryzwork.app/health
+curl -i https://api.tryzwork.app/api/session
+curl -i "https://api.tryzwork.app/api/desktop/auth/start?port=43123"
+curl -i https://db.tryzwork.app/
 ```
 
-## Server Details
+Expected:
 
-- **IP**: `129.213.43.152`
-- **OS**: Ubuntu (OCI VM)
-- **SSH Key**: `~/Downloads/ssh-key-2026-04-19.key`
-- **User**: `ubuntu`
+- `/health` returns `OK`
+- unauthenticated `/api/session` returns `401`
+- `/api/desktop/auth/start` returns `200`
+- `db.tryzwork.app` returns `403`
 
-## Subdomains
+## Security posture
 
-| Subdomain | Service | Status |
-|-----------|---------|--------|
-| `api.tryzwork.app` | API + Auth | Active |
-| `db.tryzwork.app` | pgAdmin | Active |
-| `analytics.tryzwork.app` | PostHog redirect | Active |
+## Already tightened
 
-## Health Checks
+- desktop auth is server-backed
+- public pgAdmin access is disabled at the proxy layer
+- cloud API CORS should be restricted to desktop/dev/site origins
+- hosted model gateway uses environment configuration rather than source-embedded credentials
 
-```bash
-curl https://api.tryzwork.app/health        # Axum API
-curl https://api.tryzwork.app/api/auth/health # Better Auth (via Caddy)
-```
+## Still worth hardening
+
+- add infra-level secrets management instead of flat `.env`
+- reduce auth/API coupling by documenting migration ownership clearly
+- add alerting around auth failures and gateway upstream failures
+- add server-side metrics for update adoption and auth conversion
+
+## Operational reminders
+
+- Stripe is optional for now; coupon unlocks can exercise the paid path before billing goes live.
+- Rate limits should be enforced on root user requests, not every internal model continuation.
+- The updater path is only as trustworthy as the release pipeline; keep the release workflow green and signed.
