@@ -1,0 +1,14 @@
+{
+  "recommendations": [
+    "bierner.emojizeit",
+    "bradlc.vscode-tailwindcss",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "rust-lang.rust-analyzer",
+    "tauri-apps.tauri-vscode",
+    "tyriar.sort-lines",
+    "yzhang.markdown-all-in-one"
+  ]
+}

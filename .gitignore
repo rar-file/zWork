@@ -38,7 +38,9 @@ memory.md
 benchmark-sandbox/
 
 # ===== Editor / IDE =====
-.vscode/
+!.vscode/
+.vscode/tasks.json
+.vscode/launch.json
 .idea/
 .codex
 .codex/
