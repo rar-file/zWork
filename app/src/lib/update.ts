@@ -21,6 +21,7 @@ export type UpdateProgress =
   | { phase: "error"; message: string };
 
 const releasePage = "https://github.com/Ryz3nPlayZ/zWork/releases/latest";
+const releasesApi = "https://api.github.com/repos/Ryz3nPlayZ/zWork/releases/latest";
 const lastInstalledUpdateKey = "zwork:last-installed-update";
 
 function normalizeVersion(value: string): string {
@@ -98,15 +99,68 @@ async function checkTauriUpdater(currentVersionParts: SemverVersion): Promise<Up
   }
 }
 
+interface GithubReleasePayload {
+  tag_name?: string;
+  html_url?: string;
+  body?: string;
+  draft?: boolean;
+  prerelease?: boolean;
+}
+
+async function checkGitHubReleases(
+  currentVersion: string,
+  currentVersionParts: SemverVersion,
+): Promise<UpdateCardState | null> {
+  try {
+    const response = await fetch(releasesApi, {
+      headers: { Accept: "application/vnd.github+json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const release = (await response.json()) as GithubReleasePayload;
+    if (!release.tag_name || release.draft) return null;
+
+    const latestVersion = normalizeVersion(release.tag_name);
+    if (!latestVersion) return null;
+    if (compareVersions(parseVersion(latestVersion), currentVersionParts) <= 0) return null;
+
+    return {
+      currentVersion: normalizeVersion(currentVersion),
+      latestVersion,
+      releaseUrl: release.html_url || releasePage,
+      notes: release.body || undefined,
+      source: "github",
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function detectUpdate(currentVersion: string): Promise<UpdateCardState | null> {
   const currentVersionParts = parseVersion(currentVersion);
-  return await checkTauriUpdater(currentVersionParts);
+  const fromUpdater = await checkTauriUpdater(currentVersionParts);
+  if (fromUpdater) return fromUpdater;
+  return await checkGitHubReleases(currentVersion, currentVersionParts);
 }
 
 export async function installUpdate(
   card: UpdateCardState,
   onProgress?: (progress: UpdateProgress) => void,
-): Promise<{ ok: true; willRelaunch: true } | { ok: false; message: string }> {
+): Promise<{ ok: true; willRelaunch: boolean } | { ok: false; message: string }> {
+  if (card.source === "github") {
+    try {
+      onProgress?.({ phase: "opening" });
+      await openReleaseUrl(card.releaseUrl);
+      onProgress?.({ phase: "idle" });
+      return { ok: true, willRelaunch: false };
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message ? error.message : "Could not open the release page.";
+      onProgress?.({ phase: "error", message });
+      return { ok: false, message };
+    }
+  }
+
   try {
     onProgress?.({ phase: "checking" });
     const update = await check({ timeout: 15000 });

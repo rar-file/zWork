@@ -40,16 +40,50 @@ PREV1_OLLAMA_ZWORK_ID = "qwen3-5-cloud-ollama"
 
 
 def _max_tokens_for(model_id: str) -> int:
-    """Sensible ceiling per model family. Anthropic claude-sonnet-4/4.5 allow 64k."""
+    """Sensible ceiling per model family. Anthropic claude-sonnet-4/4.5 and
+    claude-opus-4 allow 64k output; claude-3-5 / claude-3.x allow 8k."""
     mid = (model_id or "").lower()
     if "claude-sonnet-4" in mid or "claude-opus-4" in mid or "claude-4" in mid:
-        return 32000
+        return 64000
     if "claude-3-5" in mid or "claude-3.5" in mid:
         return 8192
     if "claude" in mid:
         return 8192
     # OpenAI/OpenAI-compatible: not used for `max_tokens` the same way; safe default
     return 16384
+
+
+def _apply_anthropic_cache(
+    system: str, tools: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    """Convert the Anthropic request's system/tools into cache-aware shapes.
+
+    Caches the (typically large + stable) system prompt and tool catalog using
+    `cache_control: {"type": "ephemeral"}`. Subsequent turns hit the same
+    breakpoints and pay the cache-read price (~10% of input) instead of full
+    input cost. Anthropic's docs cap us at 4 cache breakpoints per request;
+    we use 2 (system + tools) and leave room for callers that may want to
+    add their own on conversation history.
+
+    Returns (system_blocks, tools_blocks) where:
+      - system_blocks is a list with one text block carrying cache_control,
+        or empty if `system` is empty.
+      - tools_blocks is a copy of tools with cache_control attached to the
+        last entry; tools=[] returns [].
+    """
+    system_blocks: list[dict] = []
+    if system:
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+    tools_out: list[dict] = [dict(t) for t in tools]
+    if tools_out:
+        tools_out[-1]["cache_control"] = {"type": "ephemeral"}
+    return system_blocks, tools_out
 
 
 # ---------------- Credential resolution ----------------
@@ -60,6 +94,34 @@ class Credentials:
     api_key: str
     base_url: str
     source: str           # "byok" | "claude_code" | "env"
+
+
+# OpenAI-compatible providers with first-class credential slots.
+# Each entry gets its own API key + base_url under Settings.api_keys[id]
+# and Settings.provider_config[id]. Adding a new provider here makes it
+# selectable in the add-model UI without further code changes here.
+OPENAI_COMPAT_PROVIDERS: dict[str, dict[str, str]] = {
+    "groq": {
+        "label": "Groq",
+        "default_base_url": "https://api.groq.com/openai/v1",
+        "key_env": "GROQ_API_KEY",
+    },
+    "cerebras": {
+        "label": "Cerebras",
+        "default_base_url": "https://api.cerebras.ai/v1",
+        "key_env": "CEREBRAS_API_KEY",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "default_base_url": "https://api.deepseek.com/v1",
+        "key_env": "DEEPSEEK_API_KEY",
+    },
+    "zai": {
+        "label": "z.ai",
+        "default_base_url": "https://api.z.ai/api/paas/v4",
+        "key_env": "ZAI_API_KEY",
+    },
+}
 
 
 def _shape_for_credential(credential: str) -> str:
@@ -150,13 +212,34 @@ def resolve(credential: str, s: settings_mod.Settings, override_base_url: str = 
             return Credentials("anthropic", tok, base.rstrip("/"), "claude_code")
         return None
 
+    if credential in OPENAI_COMPAT_PROVIDERS:
+        spec = OPENAI_COMPAT_PROVIDERS[credential]
+        configured_base = (
+            s.provider_config.get(credential, {}).get("base_url") or ""
+        ).strip()
+        selected_base = (override_base_url or configured_base).strip()
+        default_base = spec["default_base_url"]
+
+        key = (s.api_keys.get(credential) or "").strip()
+        if key:
+            base = selected_base or default_base
+            return Credentials("openai", key, base.rstrip("/"), "byok")
+
+        env_key = os.environ.get(spec["key_env"])
+        if env_key:
+            base = selected_base or default_base
+            return Credentials("openai", env_key, base.rstrip("/"), "env")
+
+        return None
+
     _ = shape
     return None
 
 
 def credential_status(s: settings_mod.Settings) -> dict:
     out: dict[str, dict] = {}
-    for src in ("anthropic", "openai", "claude_code"):
+    sources = ("anthropic", "openai", "claude_code", *OPENAI_COMPAT_PROVIDERS.keys())
+    for src in sources:
         c = resolve(src, s)
         out[src] = {
             "configured": bool(c),
@@ -206,11 +289,15 @@ def available_models(s: settings_mod.Settings) -> list[dict]:
 
 def _subtitle_for(m: dict, cred: Optional[Credentials]) -> str:
     base = m.get("base_url_override") or (cred.base_url if cred else "")
+    credential = m.get("credential", "")
     cred_label = {
         "anthropic": "Anthropic-compatible",
         "openai": "OpenAI-compatible",
         "claude_code": "via local credentials",
-    }.get(m.get("credential", ""), m.get("credential", ""))
+    }.get(credential)
+    if cred_label is None:
+        spec = OPENAI_COMPAT_PROVIDERS.get(credential)
+        cred_label = spec["label"] if spec else credential
     if base:
         return f"{cred_label} · {base}"
     return cred_label
@@ -276,21 +363,29 @@ async def _anthropic_turn(
         headers["authorization"] = f"Bearer {creds.api_key}"
         headers["x-api-key"] = creds.api_key
 
+    system_blocks, tools_blocks = _apply_anthropic_cache(system, _anthropic_tools())
+
     body: dict = {
         "model": model_id,
         "max_tokens": _max_tokens_for(model_id),
         "stream": True,
         "messages": messages,
-        "tools": _anthropic_tools(),
+        "tools": tools_blocks,
     }
-    if system:
-        body["system"] = system
+    if system_blocks:
+        body["system"] = system_blocks
 
     yield {"type": "status", "text": "Thinking"}
 
     # Track the assistant response assembly
     blocks_by_index: dict[int, dict] = {}  # idx -> partial block
     stop_reason: Optional[str] = None
+    usage: dict[str, int] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+    }
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
@@ -361,10 +456,24 @@ async def _anthropic_turn(
                             except json.JSONDecodeError:
                                 block["input"] = {}
 
+                    elif et == "message_start":
+                        # Initial usage shows cache_creation_input_tokens and
+                        # cache_read_input_tokens — useful for the UI to
+                        # display "X tokens read from cache" on a given turn.
+                        msg = evt.get("message") or {}
+                        u = msg.get("usage") or {}
+                        for k in usage:
+                            if k in u:
+                                usage[k] = u[k]
+
                     elif et == "message_delta":
                         delta = evt.get("delta") or {}
                         if "stop_reason" in delta:
                             stop_reason = delta.get("stop_reason")
+                        u = evt.get("usage") or {}
+                        # output_tokens is cumulative on message_delta events.
+                        if "output_tokens" in u:
+                            usage["output_tokens"] = u["output_tokens"]
 
                     elif et == "message_stop":
                         break
@@ -393,6 +502,8 @@ async def _anthropic_turn(
                 "input": b.get("input", {}),
             })
 
+    # Surface usage so the UI can display per-turn cost / cache behavior.
+    yield {"type": "usage", "usage": dict(usage)}
     yield {"type": "turn_end", "content_blocks": final_blocks, "stop_reason": stop_reason}
 
 
