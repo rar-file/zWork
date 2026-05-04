@@ -259,8 +259,20 @@ fn spawn_backend(app: &tauri::AppHandle) -> Option<BackendChild> {
     start_dev_backend()
 }
 
+fn is_http_url(url: &str) -> bool {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let scheme = scheme.to_ascii_lowercase();
+        (scheme == "http" || scheme == "https") && !rest.is_empty() && !rest.starts_with('/')
+    } else {
+        false
+    }
+}
+
 #[tauri::command]
 fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    if !is_http_url(&url) {
+        return Err("only http(s) URLs may be opened externally".into());
+    }
     app.shell().open(url, None).map_err(|err| err.to_string())
 }
 
@@ -274,6 +286,9 @@ async fn begin_desktop_auth(app: tauri::AppHandle, start_url: String) -> Result<
         .map_err(|err| format!("failed to resolve auth callback port: {err}"))?
         .port();
 
+    if !is_http_url(&start_url) {
+        return Err("auth start_url must be an http(s) URL".into());
+    }
     let separator = if start_url.contains('?') { '&' } else { '?' };
     let launch_url = format!("{start_url}{separator}port={port}");
     app.shell()
@@ -356,6 +371,56 @@ fn percent_decode(input: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+#[cfg(test)]
+mod is_http_url_tests {
+    use super::is_http_url;
+
+    #[test]
+    fn accepts_https_with_host() {
+        assert!(is_http_url("https://example.com"));
+        assert!(is_http_url("https://example.com/path?query=1"));
+    }
+
+    #[test]
+    fn accepts_http_with_host() {
+        assert!(is_http_url("http://example.com"));
+        assert!(is_http_url("http://localhost:8080/foo"));
+    }
+
+    #[test]
+    fn case_insensitive_scheme() {
+        assert!(is_http_url("HTTPS://example.com"));
+        assert!(is_http_url("Http://example.com"));
+    }
+
+    #[test]
+    fn rejects_other_schemes() {
+        // The whole point of the guard.
+        assert!(!is_http_url("file:///etc/passwd"));
+        assert!(!is_http_url("javascript:alert(1)"));
+        assert!(!is_http_url("ftp://example.com"));
+        assert!(!is_http_url("smb://attacker/share"));
+        assert!(!is_http_url("vscode://settings"));
+        assert!(!is_http_url("data:text/html,<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn rejects_no_scheme() {
+        assert!(!is_http_url(""));
+        assert!(!is_http_url("example.com"));
+        assert!(!is_http_url("/etc/passwd"));
+    }
+
+    #[test]
+    fn rejects_empty_or_path_only_host() {
+        // "http://" alone, or "http:///path" with no host, would be passed
+        // straight to xdg-open and behave unpredictably.
+        assert!(!is_http_url("http://"));
+        assert!(!is_http_url("https://"));
+        assert!(!is_http_url("http:///etc/passwd"));
+    }
 }
 
 fn main() {
