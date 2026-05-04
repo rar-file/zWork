@@ -89,6 +89,22 @@ const CREDENTIAL_PLACEHOLDERS: Record<string, { keyPlaceholder: string; baseUrlP
     keyPlaceholder: "(reuses local credentials — no key needed)",
     baseUrlPlaceholder: "",
   },
+  groq: {
+    keyPlaceholder: "gsk_…",
+    baseUrlPlaceholder: "https://api.groq.com/openai/v1",
+  },
+  cerebras: {
+    keyPlaceholder: "csk-…",
+    baseUrlPlaceholder: "https://api.cerebras.ai/v1",
+  },
+  deepseek: {
+    keyPlaceholder: "sk-…",
+    baseUrlPlaceholder: "https://api.deepseek.com/v1",
+  },
+  zai: {
+    keyPlaceholder: "(z.ai API key)",
+    baseUrlPlaceholder: "https://api.z.ai/api/paas/v4",
+  },
 };
 
 export function SettingsPage() {
@@ -389,6 +405,10 @@ function ModelsPanel({
                 >
                   <option value="anthropic">Anthropic (BYOK)</option>
                   <option value="openai">OpenAI-compatible (BYOK)</option>
+                  <option value="groq">Groq (BYOK)</option>
+                  <option value="cerebras">Cerebras (BYOK)</option>
+                  <option value="deepseek">DeepSeek (BYOK)</option>
+                  <option value="zai">z.ai (BYOK)</option>
                   <option value="claude_code">Local config (reuse credentials)</option>
                 </select>
             </Field>
