@@ -2,6 +2,14 @@
 
 All notable changes to zWork are documented here.
 
+## v0.3.18-beta.5
+
+**Release fallback so users can still install the latest build when the native updater is flaky.**
+
+- added a GitHub Releases fallback in update detection so the app can still surface the newest installer
+- kept the native Tauri updater path first, so normal updater installs still work when the pipeline is healthy
+- wired the release workflow to publish the new beta tag and fresh installer assets
+
 ## v0.3.18-beta.4
 
 **Design system polish and accessibility improvements.**
